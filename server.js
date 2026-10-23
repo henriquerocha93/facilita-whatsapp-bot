@@ -289,7 +289,7 @@ Digite *0* para voltar ao menu principal.`,
    • Placa ou modelo da moto
    • Local / Bairro onde ocorreu o fato
 
-⚠️ *A nossa central e o Henrique já foram acionados com sirene de alerta máximo para bloqueio e localização satelital agora mesmo!*`,
+⚠️ *A nossa central de monitoramento já foi acionada com prioridade máxima para bloqueio e localização satelital imediata do veículo!*`,
 
     foraDoHorario: `🕒 *ATENDIMENTO COM ATENDENTE HUMANO*
 
@@ -742,7 +742,7 @@ Responda qualquer mensagem para testar a ponte de envio pelo WhatsApp oficial da
                             const msgConfirmacaoCliente = `🧑‍💼 *ATENDIMENTO HUMANO — FACILITA MOTO*
 
 Olá ${pushName}! Você foi transferido para nossa equipe de atendimento.
-O Henrique já foi notificado no celular particular e vai te responder diretamente por aqui em instantes!
+A nossa central já foi notificada e vai te responder diretamente por aqui em instantes!
 
 Pode ir digitando sua mensagem ou dúvida enquanto isso. 👇
 *(Para cancelar e voltar ao menu automático a qualquer momento, digite "sair").*`;
