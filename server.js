@@ -1038,6 +1038,187 @@ app.get('/', (req, res) => {
     `);
 });
 
+// --- ROBÔ COLETOR 24H XTRACK / FULLTRACK (xtrack.app.br / tela.xtrack.app.br) ---
+let xtrackSessionCookie = null;
+let lastXtrackLoginTime = 0;
+let lastLiveTelemetry = {
+    id: '00018E1B',
+    iccid: '89555480000080813880',
+    placa: 'IPU2I57',
+    lat: -30.018797,
+    lng: -51.206461,
+    velocidade: 13,
+    ignicao: true,
+    odometro: 270185,
+    kmAtual: 270185,
+    endereco: 'Rua Câncio Gomes, 664, Floresta, Porto Alegre - RS, 90220-060, Brasil',
+    updatedAt: new Date().toISOString(),
+    source: 'xtrack_live_crawler'
+};
+
+async function autenticarXtrack() {
+    try {
+        const initialRes = await fetch('https://tela.xtrack.app.br/', {
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
+            }
+        });
+        const setCookie = initialRes.headers.get('set-cookie');
+        const cookies = [];
+        if (setCookie) {
+            setCookie.split(',').forEach(c => {
+                const part = c.split(';')[0].trim();
+                if (part && !cookies.includes(part)) cookies.push(part);
+            });
+        }
+        const cookieHeader = cookies.join('; ');
+
+        const formData = new URLSearchParams();
+        formData.append('login', process.env.XTRACK_LOGIN || '51986551068');
+        formData.append('password', process.env.XTRACK_PASSWORD || '120909');
+
+        const loginRes = await fetch('https://tela.xtrack.app.br/emp/tela', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/x-www-form-urlencoded',
+                'Cookie': cookieHeader,
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Origin': 'https://tela.xtrack.app.br',
+                'Referer': 'https://tela.xtrack.app.br/'
+            },
+            body: formData.toString(),
+            redirect: 'manual'
+        });
+
+        if (loginRes.status === 302 || loginRes.status === 200) {
+            xtrackSessionCookie = cookieHeader;
+            lastXtrackLoginTime = Date.now();
+            console.log('✅ [Xtrack Bot] Sessão autenticada com sucesso em tela.xtrack.app.br!');
+            return true;
+        }
+        return false;
+    } catch (e) {
+        console.error('❌ [Xtrack Bot] Erro na autenticação:', e.message);
+        return false;
+    }
+}
+
+async function coletarTelemetriaXtrackAoVivo() {
+    try {
+        const now = Date.now();
+        if (!xtrackSessionCookie || now - lastXtrackLoginTime > 45 * 60 * 1000) {
+            await autenticarXtrack();
+        }
+        if (!xtrackSessionCookie) return lastLiveTelemetry;
+
+        const formData = new URLSearchParams();
+        formData.append('clientes[]', '600696');
+
+        let res = await fetch('https://tela.xtrack.app.br/mapaGeral/atualizaMapa', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/x-www-form-urlencoded',
+                'Cookie': xtrackSessionCookie,
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Referer': 'https://tela.xtrack.app.br/mapaGeral',
+                'X-Requested-With': 'XMLHttpRequest'
+            },
+            body: formData.toString()
+        });
+
+        let json = await res.json().catch(() => null);
+
+        if (!json || json.status !== true) {
+            console.log('🔄 [Xtrack Bot] Sessão expirou, reautenticando...');
+            const ok = await autenticarXtrack();
+            if (ok) {
+                res = await fetch('https://tela.xtrack.app.br/mapaGeral/atualizaMapa', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/x-www-form-urlencoded',
+                        'Cookie': xtrackSessionCookie,
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                        'Referer': 'https://tela.xtrack.app.br/mapaGeral',
+                        'X-Requested-With': 'XMLHttpRequest'
+                    },
+                    body: formData.toString()
+                });
+                json = await res.json().catch(() => null);
+            }
+        }
+
+        if (json && json.status === true && Array.isArray(json.dados) && json.dados.length > 0) {
+            const motoData = json.dados[0];
+            const loc = motoData.loc || [];
+            const lat = parseFloat(loc[0]);
+            const lng = parseFloat(loc[1]);
+            const vel = parseInt(motoData.ras_eve_velocidade) || 0;
+            const ignicao = parseInt(motoData.ras_eve_ignicao) === 1;
+            const odo = parseInt(motoData.ras_veiculos?.ras_vei_odometro) || 270185;
+            const placa = motoData.ras_veiculos?.ras_vei_placa || 'IPU2I57';
+
+            if (!isNaN(lat) && !isNaN(lng)) {
+                let endereco = lastLiveTelemetry?.endereco || 'Porto Alegre - RS';
+                if (!lastLiveTelemetry || Math.abs(lat - lastLiveTelemetry.lat) > 0.0003 || Math.abs(lng - lastLiveTelemetry.lng) > 0.0003) {
+                    try {
+                        const geoRes = await fetch(`https://nominatim.openstreetmap.org/reverse?lat=${lat}&lon=${lng}&format=json`, {
+                            headers: { 'User-Agent': 'FacilitaMotoBot/1.0 (contato@facilitamoto.com.br)' }
+                        });
+                        const geoData = await geoRes.json();
+                        if (geoData && geoData.display_name) {
+                            endereco = geoData.display_name;
+                        }
+                    } catch (e) {}
+                }
+
+                lastLiveTelemetry = {
+                    id: '00018E1B',
+                    iccid: '89555480000080813880',
+                    placa: placa,
+                    lat: lat,
+                    lng: lng,
+                    velocidade: vel,
+                    ignicao: ignicao,
+                    odometro: odo,
+                    kmAtual: odo,
+                    endereco: endereco,
+                    updatedAt: new Date().toISOString(),
+                    source: 'xtrack_live_crawler'
+                };
+
+                // Envia telemetria ao vivo para a API do CRM Vercel
+                fetch('https://www.facilitamoto.com.br/api/telemetry', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(lastLiveTelemetry)
+                }).catch(() => {});
+
+                console.log(`📡 [Xtrack Live]: ${placa} | Lat: ${lat}, Lng: ${lng} | ${vel} km/h | Ign: ${ignicao ? 'ON' : 'OFF'} | Odo: ${odo} km`);
+            }
+        }
+        return lastLiveTelemetry;
+    } catch (err) {
+        console.error('⚠️ [Xtrack Bot Error]:', err.message);
+        return lastLiveTelemetry;
+    }
+}
+
+// Endpoint de Consulta em Tempo Real pelo CRM
+app.get('/api/tracker-live', (req, res) => {
+    res.json({
+        status: 'ok',
+        device: lastLiveTelemetry,
+        lastSync: lastLiveTelemetry ? lastLiveTelemetry.updatedAt : null
+    });
+});
+
+// Endpoint para Forçar Sincronização Imediata
+app.post('/api/tracker-sync', async (req, res) => {
+    const data = await coletarTelemetriaXtrackAoVivo();
+    res.json({ status: 'ok', device: data });
+});
+
 // Endpoint Principal de Disparo de Mensagens (/send-message) do CRM
 app.post('/send-message', async (req, res) => {
     const body = req.body || {};
@@ -1101,4 +1282,14 @@ app.listen(PORT, () => {
             })
             .catch(err => console.error('⚠️ [Keep-Alive Error]:', err.message));
     }, 8 * 60 * 1000); // Dispara a cada 8 minutos
+
+    // Robô Coletor 24h de GPS do Xtrack (Atualiza posição a cada 20 segundos)
+    setInterval(() => {
+        coletarTelemetriaXtrackAoVivo().catch(e => console.error('Erro ciclo telemetria:', e.message));
+    }, 20 * 1000);
+
+    // Primeira coleta imediata após 4 segundos de inicialização
+    setTimeout(() => {
+        coletarTelemetriaXtrackAoVivo().catch(e => console.error('Erro primeira telemetria:', e.message));
+    }, 4000);
 });
