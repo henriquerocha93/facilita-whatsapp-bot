@@ -48,6 +48,21 @@ function normalizarTelefone(numero) {
     return limpo;
 }
 
+// Formata o número brasileiro garantindo o 9º dígito para que o link https://wa.me/ abra perfeitamente
+function formatarParaWaMe(numero) {
+    let limpo = String(numero || '').replace(/\D/g, '');
+    if (!limpo) return '';
+    if (limpo.length === 10 || limpo.length === 11) {
+        limpo = `55${limpo}`;
+    }
+    if (limpo.startsWith('55') && limpo.length === 12) {
+        const ddd = limpo.substring(2, 4);
+        const resto = limpo.substring(4);
+        limpo = `55${ddd}9${resto}`;
+    }
+    return limpo;
+}
+
 function getSaoPauloDate() {
     const now = new Date();
     const spString = now.toLocaleString("en-US", { timeZone: "America/Sao_Paulo" });
@@ -513,15 +528,16 @@ Digite *0* para voltar ao menu principal.`;
                     // Notifica imediatamente o Henrique no WhatsApp particular como NOVO LEAD
                     const hJid = henriqueJidCache || await getValidatedJid(HENRIQUE_RAW_PHONE);
                     if (hJid) {
+                        const phoneWaMe = formatarParaWaMe(senderNumber);
                         const alertaLead = `🔥 *NOVO LEAD NA FILA DE ESPERA — FACILITA MOTO* 🔥
 👤 *Nome:* ${pushName}
-📱 *Telefone:* ${senderNumber}
+📱 *Telefone:* ${phoneWaMe}
 ⏰ *Horário:* ${horaSP}
 💬 *Dados informados:*
 "${textoOriginal || '[Foto ou documento enviado]'}"
 
 👉 *CLIQUE AQUI PARA FALAR COM O LEAD AGORA:*
-https://wa.me/${senderNumber}`;
+https://wa.me/${phoneWaMe}`;
                         await enviarMensagem(hJid, alertaLead);
                     }
                     continue;
@@ -600,13 +616,20 @@ Digite *0* para voltar ao menu principal.`);
 
                 // Opção 5: ROUBO OU FURTO (EMERGÊNCIA 24H)
                 if (texto === '5' || textoLower.includes('roubo') || textoLower.includes('furto') || textoLower.includes('emergencia') || textoLower.includes('emergência') || textoLower.includes('socorro')) {
+                    // Coloca imediatamente o cliente em atendimento humano e ativa o Relay para Henrique
+                    sessao.mode = 'HUMAN_SUPPORT';
+                    clientSessions.set(remoteJid, sessao);
+                    activeRelayClientJid = remoteJid;
+
                     await enviarMensagem(remoteJid, MENUS.emergenciaRoubo);
 
                     const horaSP = getSaoPauloDate().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+                    const phoneWaMe = formatarParaWaMe(senderNumber);
+
                     const alertObj = {
                         id: `EMERGENCY-${Date.now()}`,
                         clienteNome: pushName,
-                        clienteTelefone: senderNumber,
+                        clienteTelefone: phoneWaMe,
                         mensagem: textoOriginal || 'Acionou canal de Roubo/Furto',
                         hora: horaSP,
                         timestamp: Date.now()
@@ -618,12 +641,15 @@ Digite *0* para voltar ao menu principal.`);
                     if (hJid) {
                         const alertaMaximo = `🚨🚨🚨 *ALERTA MÁXIMO: COMUNICADO DE ROUBO/FURTO* 🚨🚨🚨
 👤 *Cliente:* ${pushName}
-📱 *Número:* ${senderNumber}
+📱 *Número:* ${phoneWaMe}
 ⏰ *Hora:* ${horaSP}
 💬 *Mensagem do condutor:* "${textoOriginal || 'Acionou opção de Roubo/Furto'}"
 
-👉 *CLIQUE AQUI PARA FALAR COM O CLIENTE AGORA:*
-https://wa.me/${senderNumber}
+👉 *OPÇÃO 1 — CLIQUE PARA FALAR NO WHATSAPP:*
+https://wa.me/${phoneWaMe}
+
+👉 *OPÇÃO 2 — RESPONDA DIRETO AQUI:*
+Basta responder esta mensagem que ela será enviada ao condutor pelo WhatsApp da Facilita!
 
 ⚠️ *Acesse o aplicativo da Xtrack para bloqueio e localização satelital do veículo!*`;
                         await enviarMensagem(hJid, alertaMaximo);
@@ -655,14 +681,18 @@ Pode ir digitando sua mensagem ou dúvida enquanto isso. 👇
                         const hJid = henriqueJidCache || await getValidatedJid(HENRIQUE_RAW_PHONE);
                         if (hJid) {
                             const horaSP = getSaoPauloDate().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+                            const phoneWaMe = formatarParaWaMe(senderNumber);
                             const notificacaoHenrique = `🛎️ *NOVA SOLICITAÇÃO DE ATENDIMENTO HUMANO* 🛎️
 👤 *Cliente:* ${pushName}
-📱 *Telefone:* ${senderNumber}
+📱 *Telefone:* ${phoneWaMe}
 ⏰ *Horário:* ${horaSP}
 
-💬 *Você pode responder diretamente aqui no seu WhatsApp particular e sua resposta será enviada ao cliente pelo número da Facilita Moto!*
-👉 Ou abra a conversa direta: https://wa.me/${senderNumber}
-Para encerrar depois, basta digitar *#sair*.`;
+👉 *OPÇÃO 1 — CLIQUE PARA ABRIR O WHATSAPP:*
+https://wa.me/${phoneWaMe}
+
+👉 *OPÇÃO 2 — RESPONDA DIRETO AQUI:*
+Você pode responder diretamente aqui no seu WhatsApp particular e sua resposta será enviada ao cliente pelo número da Facilita Moto!
+(Para encerrar digite *#sair*).`;
                             await enviarMensagem(hJid, notificacaoHenrique);
                         }
                     }
