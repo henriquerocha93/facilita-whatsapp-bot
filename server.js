@@ -296,7 +296,7 @@ Locação de motos com quilometragem livre e suporte completo.
 *3* - 🛢️ Informar Troca de Óleo (1.000 km)
 *4* - 🔓 Solicitar Desbloqueio da Moto
 *5* - 🚨 Informar Roubo ou Furto (Emergência 24h)
-*6* - 💬 Falar com Atendente Humano (10h às 18h)`,
+*6* - 💬 Falar com Atendente Humano`,
 
     motos: `🏍️ *FACILITA MOTO — DISPONIBILIDADE E REQUISITOS*
 
@@ -797,22 +797,18 @@ Qualquer mensagem que você digitar agora será entregue ao condutor pelo WhatsA
                     continue;
                 }
 
-                // Opção 6: Falar com Atendente Humano
+                // Opção 6: Falar com Atendente Humano (Ponte Bidirecional 24h Henrique <-> Cliente)
                 if (texto === '6' || textoLower.includes('atendente') || textoLower.includes('falar') || textoLower.includes('humano')) {
-                    const aberto = isAtendimentoHumanoDisponivel();
+                    sessao.mode = 'HUMAN_SUPPORT';
+                    clientSessions.set(remoteJid, sessao);
 
-                    if (!aberto) {
-                        await enviarMensagem(remoteJid, MENUS.foraDoHorario);
-                    } else {
-                        sessao.mode = 'HUMAN_SUPPORT';
-                        clientSessions.set(remoteJid, sessao);
+                    const horaSP = getSaoPauloDate().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+                    const phoneWaMe = formatarParaWaMe(senderNumber);
 
-                        const horaSP = getSaoPauloDate().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
-                        const phoneWaMe = formatarParaWaMe(senderNumber);
+                    // Ativa a Ponte de Suporte conectando Henrique ao Cliente
+                    salvarSuporteAtivo(remoteJid, phoneWaMe, pushName);
 
-                        salvarSuporteAtivo(remoteJid, phoneWaMe, pushName);
-
-                        const msgConfirmacaoCliente = `🧑‍💼 *ATENDIMENTO HUMANO — FACILITA MOTO*
+                    const msgConfirmacaoCliente = `🧑‍💼 *ATENDIMENTO HUMANO — FACILITA MOTO*
 
 Olá ${pushName}! Você foi transferido para nossa equipe de atendimento.
 A nossa central já foi notificada e vai te responder diretamente por aqui em instantes!
@@ -820,22 +816,24 @@ A nossa central já foi notificada e vai te responder diretamente por aqui em in
 Pode ir digitando sua mensagem ou dúvida enquanto isso. 👇
 *(Para cancelar e voltar ao menu automático a qualquer momento, digite "sair").*`;
 
-                        await enviarMensagem(remoteJid, msgConfirmacaoCliente);
+                    await enviarMensagem(remoteJid, msgConfirmacaoCliente);
 
-                        const hJid = henriqueJidCache || await getValidatedJid(HENRIQUE_RAW_PHONE);
-                        if (hJid) {
-                            const notificacaoHenrique = `🛎️ *NOVA SOLICITAÇÃO DE ATENDIMENTO HUMANO* 🛎️
+                    // Dispara a Notificação com a Ponte Ativada diretamente no WhatsApp pessoal do Henrique
+                    const hJid = henriqueJidCache || await getValidatedJid(HENRIQUE_RAW_PHONE, true);
+                    if (hJid) {
+                        const notificacaoHenrique = `🛎️ *NOVA SOLICITAÇÃO DE ATENDIMENTO HUMANO* 🛎️
 👤 *Cliente:* ${pushName}
-📱 *Telefone:* ${phoneWaMe}
+📱 *WhatsApp:* ${phoneWaMe}
 ⏰ *Horário:* ${horaSP}
+💬 *Mensagem dele:* "${textoOriginal || 'Opção 6 - Falar com Atendente'}"
 
 🟢 *A PONTE ESTÁ ATIVADA!*
-Basta responder a esta mensagem e sua resposta será enviada ao cliente pelo WhatsApp da Facilita \`(51) 8142-9980\`!
+Basta responder esta mensagem aqui no seu WhatsApp!
+Qualquer mensagem que você digitar agora será entregue ao cliente pelo WhatsApp da Facilita \`(51) 8142-9980\`!
 
 👉 Ou clique para abrir a conversa direta: https://wa.me/${phoneWaMe}
 *(Para encerrar depois, basta digitar #sair).*`;
-                            await enviarMensagem(hJid, notificacaoHenrique);
-                        }
+                        await enviarMensagem(hJid, notificacaoHenrique);
                     }
                     continue;
                 }
