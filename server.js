@@ -29,10 +29,11 @@ const HENRIQUE_RAW_PHONE = '5551986551068';
 const MP_ACCESS_TOKEN = 'APP_USR-6194243169013538-102220-43c64ed326354129ba6d2d512a427b04-213948720';
 let henriqueJidCache = null;
 
-// Armazenamento de Sessões e Emergências
+// Armazenamento de Sessões, Emergências e Leads
 const clientSessions = new Map();
 let activeRelayClientJid = null;
-let activeEmergencies = []; // Armazena alertas de Roubo/Furto para o som no CRM
+let activeEmergencies = []; // Alertas de Roubo/Furto para o som no CRM
+let leadsFilaDeEspera = []; // Leads que entraram na fila de espera
 
 const AUTH_FOLDER = path.join(__dirname, 'auth_session');
 if (!fs.existsSync(AUTH_FOLDER)) {
@@ -166,7 +167,6 @@ async function criarPixMercadoPago(identificador = 'Cliente') {
     };
 }
 
-// Resolve o JID do WhatsApp
 async function getValidatedJid(numero) {
     if (!sock || !isConnected) return null;
     const numLimpo = normalizarTelefone(numero);
@@ -205,39 +205,41 @@ async function enviarMensagem(targetJid, texto) {
     }
 }
 
-// Menus Sequenciais 1, 2, 3, 4, 5, 6
+// Menus Sequenciais 1 a 6 com Requisitos e Valores Atualizados
 const MENUS = {
     principal: `👋 Olá! Seja muito bem-vindo(a) à *Facilita Moto*! 🏍️💨
 Locação de motos com quilometragem livre e suporte completo.
 
 *Digite o NÚMERO da opção desejada:*
 
-*1* - 🏍️ Motos Disponíveis (Valores e Requisitos)
+*1* - 🏍️ Motos Disponíveis (Fila de Espera e Requisitos)
 *2* - 💳 2ª Via do PIX Semanal (Gerar código na hora)
 *3* - 🛢️ Informar Troca de Óleo (1.000 km)
 *4* - 🔓 Solicitar Desbloqueio da Moto
 *5* - 🚨 Informar Roubo ou Furto (Emergência 24h)
 *6* - 💬 Falar com Atendente Humano (10h às 18h)`,
 
-    motos: `🏍️ *FACILITA MOTO — INFORMAÇÕES DE LOCAÇÃO*
+    motos: `🏍️ *FACILITA MOTO — DISPONIBILIDADE E REQUISITOS*
 
-✅ *Modelo Disponível:* Honda CG 150 Titan Mix
-• Super econômica, totalmente revisada e pronta para rodar!
-• *Quilometragem Livre* (rode o quanto precisar).
-• *Rastreador Xtrack integrado* com bloqueio via satélite.
-• Manutenção preventiva por nossa conta (óleo, pneus, freios).
+⚠️ *Status da Frota:* No momento, *todas as nossas motos estão 100% LOCADAS!* 🛵💨
+Nossa procura é grande, mas abrimos vagas conforme devoluções e novas motos entram na frota.
 
-💰 *Valores:*
-• *R$ 350,00 por semana* (apenas R$ 50,00 por dia!)
-• *Caução facilitada:* R$ 500,00 (devolvida no encerramento).
+💰 *Valores para Retirada (R$ 700,00):*
+• *R$ 350,00 de Caução* (devolvida no encerramento do contrato)
+• *R$ 350,00 do Aluguel da 1ª Semana* (o valor semanal pode variar conforme o modelo disponível no painel adm)
+• *Total de Entrada:* R$ 700,00 (caução + 1ª semana adiantada)
+• *Quilometragem Livre* para você rodar e lucrar!
 
-📋 *Requisitos:*
-1. CNH categoria A válida
-2. Comprovante de residência atualizado
-3. Pagamento da caução + 1ª semana na retirada
+📋 *Requisitos Obrigatórios para Locação:*
+1. *CNH Categoria A* (válida)
+2. *Comprovante de Residência:* No seu próprio nome OU com firma autenticada em cartório (caso seja no nome de terceiros)
+3. *1 Testemunha presente* no dia da assinatura do contrato
+4. Pagamento do valor de entrada (R$ 700,00) no ato da retirada
 
-👉 *Deseja alugar ou enviar seus documentos?*
-Digite *6* para falar diretamente com nosso atendente!
+👉 *Deseja entrar na nossa Fila de Espera prioritária?*
+Envie agora o seu *Nome Completo*, seu *Bairro* e a foto da sua *CNH* aqui nesta conversa!
+Assim que uma vaga liberar, nossa equipe entrará em contato com você com prioridade!
+
 Digite *0* para voltar ao menu principal.`,
 
     pedeIdentificacaoPix: `💳 *2ª VIA PIX SEMANAL — FACILITA MOTO*
@@ -404,8 +406,18 @@ async function startWhatsAppBot() {
                     if (textoLower === '#status') {
                         const statusMsg = activeRelayClientJid
                             ? `👤 Cliente em atendimento ativo: ${activeRelayClientJid.replace('@s.whatsapp.net', '')}\nDigite qualquer mensagem normal para responder a ele ou #sair para finalizar.`
-                            : `Nenhum cliente em atendimento ativo no momento.`;
+                            : `Nenhum cliente em atendimento ativo no momento. Total de leads na fila: ${leadsFilaDeEspera.length}`;
                         await enviarMensagem(remoteJid, statusMsg);
+                        continue;
+                    }
+
+                    if (textoLower === '#leads') {
+                        if (leadsFilaDeEspera.length === 0) {
+                            await enviarMensagem(remoteJid, `📋 Nenhum lead na fila de espera no momento.`);
+                        } else {
+                            const lista = leadsFilaDeEspera.slice(0, 10).map((l, i) => `${i + 1}. *${l.nome}* (${l.telefone}) - ${l.hora}\n"${l.dados}"`).join('\n\n');
+                            await enviarMensagem(remoteJid, `📋 *ÚLTIMOS LEADS DA FILA DE ESPERA:*\n\n${lista}`);
+                        }
                         continue;
                     }
 
@@ -413,7 +425,8 @@ async function startWhatsAppBot() {
                         await enviarMensagem(remoteJid, `🛠️ *COMANDOS:*
 • Mensagem normal: Envia direto para o cliente ativo.
 • *#sair*: Encerra o atendimento humano e religa o robô.
-• *#status*: Mostra o cliente ativo atual.`);
+• *#status*: Mostra o cliente ativo atual.
+• *#leads*: Lista os clientes na fila de espera.`);
                         continue;
                     }
 
@@ -461,6 +474,59 @@ async function startWhatsAppBot() {
                     continue;
                 }
 
+                // Se o cliente estiver enviando dados para a FILA DE ESPERA (Novo Lead)
+                if (sessao.mode === 'WAITING_LEAD_INFO') {
+                    if (texto === '0' || textoLower === 'menu' || textoLower === 'voltar') {
+                        sessao.mode = 'MENU';
+                        clientSessions.set(remoteJid, sessao);
+                        await enviarMensagem(remoteJid, MENUS.principal);
+                        continue;
+                    }
+
+                    sessao.mode = 'MENU';
+                    clientSessions.set(remoteJid, sessao);
+
+                    const horaSP = getSaoPauloDate().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+                    const novoLead = {
+                        id: `LEAD-${Date.now()}`,
+                        nome: pushName,
+                        telefone: senderNumber,
+                        dados: textoOriginal || 'Enviou documento/foto',
+                        hora: horaSP,
+                        timestamp: Date.now()
+                    };
+                    leadsFilaDeEspera.unshift(novoLead);
+                    if (leadsFilaDeEspera.length > 50) leadsFilaDeEspera.pop();
+
+                    // Responde o cliente confirmando a entrada na fila
+                    const respCliente = `✅ *CADASTRO REALIZADO NA FILA DE ESPERA!* 🏍️📋
+
+Muito obrigado, *${pushName}*! Seus dados foram cadastrados com sucesso em nossa Fila de Espera prioritária.
+
+Assim que uma moto for liberada para locação, entraremos em contato direto com você por aqui!
+
+*(Lembrando que os requisitos para retirada são: R$ 700,00 de entrada [caução + 1ª semana], CNH A, comprovante de residência e 1 testemunha no contrato).*
+
+Digite *0* para voltar ao menu principal.`;
+                    await enviarMensagem(remoteJid, respCliente);
+
+                    // Notifica imediatamente o Henrique no WhatsApp particular como NOVO LEAD
+                    const hJid = henriqueJidCache || await getValidatedJid(HENRIQUE_RAW_PHONE);
+                    if (hJid) {
+                        const alertaLead = `🔥 *NOVO LEAD NA FILA DE ESPERA — FACILITA MOTO* 🔥
+👤 *Nome:* ${pushName}
+📱 *Telefone:* ${senderNumber}
+⏰ *Horário:* ${horaSP}
+💬 *Dados informados:*
+"${textoOriginal || '[Foto ou documento enviado]'}"
+
+👉 *CLIQUE AQUI PARA FALAR COM O LEAD AGORA:*
+https://wa.me/${senderNumber}`;
+                        await enviarMensagem(hJid, alertaLead);
+                    }
+                    continue;
+                }
+
                 // Se o cliente estava aguardando envio de Nome/CPF/Placa para o PIX
                 if (sessao.mode === 'WAITING_PIX_INFO') {
                     sessao.mode = 'MENU';
@@ -481,7 +547,6 @@ async function startWhatsAppBot() {
 
                     await enviarMensagem(remoteJid, textoPix);
 
-                    // Envia o código PIX Copia e Cola isolado para copiar com 1 toque
                     setTimeout(async () => {
                         await enviarMensagem(remoteJid, pixData.pixCopiaECola);
 
@@ -505,8 +570,10 @@ Digite *0* para voltar ao menu principal.`);
                 sessao.lastActive = Date.now();
                 clientSessions.set(remoteJid, sessao);
 
-                // Opção 1: Motos Disponíveis
+                // Opção 1: Motos Disponíveis (Informa que estão todas locadas e coloca em modo de espera)
                 if (texto === '1' || textoLower.includes('motos') || textoLower.includes('disponivel') || textoLower.includes('aluguel') || textoLower.includes('valor')) {
+                    sessao.mode = 'WAITING_LEAD_INFO';
+                    clientSessions.set(remoteJid, sessao);
                     await enviarMensagem(remoteJid, MENUS.motos);
                     continue;
                 }
@@ -533,10 +600,8 @@ Digite *0* para voltar ao menu principal.`);
 
                 // Opção 5: ROUBO OU FURTO (EMERGÊNCIA 24H)
                 if (texto === '5' || textoLower.includes('roubo') || textoLower.includes('furto') || textoLower.includes('emergencia') || textoLower.includes('emergência') || textoLower.includes('socorro')) {
-                    // Responde o cliente
                     await enviarMensagem(remoteJid, MENUS.emergenciaRoubo);
 
-                    // Cria alerta para tocar som de alarme no CRM do administrador
                     const horaSP = getSaoPauloDate().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
                     const alertObj = {
                         id: `EMERGENCY-${Date.now()}`,
@@ -549,7 +614,6 @@ Digite *0* para voltar ao menu principal.`);
                     activeEmergencies.unshift(alertObj);
                     if (activeEmergencies.length > 20) activeEmergencies.pop();
 
-                    // Dispara notificação com som / prioridade máxima no celular do Henrique
                     const hJid = henriqueJidCache || await getValidatedJid(HENRIQUE_RAW_PHONE);
                     if (hJid) {
                         const alertaMaximo = `🚨🚨🚨 *ALERTA MÁXIMO: COMUNICADO DE ROUBO/FURTO* 🚨🚨🚨
@@ -655,8 +719,9 @@ app.get('/status', (req, res) => {
         hasQr: !!currentQrCodeDataUrl,
         activeRelayClient: activeRelayClientJid ? activeRelayClientJid.replace('@s.whatsapp.net', '') : null,
         totalSessions: clientSessions.size,
-        horarioAtendimentoDisponivel: isAtendimentoHumanoDisponivel(),
+        leadsCount: leadsFilaDeEspera.length,
         emergenciesCount: activeEmergencies.length,
+        horarioAtendimentoDisponivel: isAtendimentoHumanoDisponivel(),
         uptime: process.uptime(),
         timestamp: new Date().toISOString()
     });
@@ -670,7 +735,7 @@ app.get('/api/emergencies', (req, res) => {
     });
 });
 
-// Endpoint para o CRM silenciar/descartar emergência
+// Endpoint para silenciar emergências
 app.post('/api/emergencies/dismiss', (req, res) => {
     const { id } = req.body || {};
     if (id) {
@@ -679,6 +744,14 @@ app.post('/api/emergencies/dismiss', (req, res) => {
         activeEmergencies = [];
     }
     res.json({ ok: true, activeEmergencies: activeEmergencies.length });
+});
+
+// Endpoint de Leads para o CRM
+app.get('/api/leads', (req, res) => {
+    res.json({
+        ok: true,
+        leads: leadsFilaDeEspera
+    });
 });
 
 // Endpoint de Ping
@@ -724,7 +797,7 @@ app.get('/', (req, res) => {
         <div class="logo">
             <i class="fa-solid fa-motorcycle"></i> FACILITA MOTO
         </div>
-        <p class="subtitle">Robô URA Inteligente & Central de Atendimento</p>
+        <p class="subtitle">Robô URA Inteligente & Captação de Leads</p>
 
         <div id="status-container">
             ${isConnected ? `
@@ -736,10 +809,10 @@ app.get('/', (req, res) => {
                         <i class="fa-solid fa-robot"></i> Recursos Ativos:
                     </strong>
                     <ul style="font-size:0.85rem; color:#a7f3d0; padding-left:20px; line-height:1.6;">
-                        <li><strong>Menu Sequencial:</strong> 1 (Motos), 2 (PIX Direto), 3 (Óleo), 4 (Desbloqueio), 5 (Roubo/Furto), 6 (Atendente)</li>
-                        <li><strong>Geração PIX:</strong> 100% Automático via Mercado Pago no WhatsApp (sem site)</li>
-                        <li><strong>Alerta Roubo/Furto:</strong> Dispara som no CRM + WhatsApp do Henrique com link imediato</li>
-                        <li><strong>Horário Atendente:</strong> ${atendimentoAberto ? '<span style="color:#4ade80;">ABERTO (Disponível)</span>' : '<span style="color:#f87171;">FECHADO (10h às 18h Seg-Sáb)</span>'}</li>
+                        <li><strong>Motos 100% Locadas:</strong> Capta novos Leads na Fila de Espera</li>
+                        <li><strong>Requisitos:</strong> R$ 700 entrada (R$ 350 caução + R$ 350 semana), CNH A, Comprovante e 1 Testemunha</li>
+                        <li><strong>PIX Automático:</strong> Mercado Pago sem redirecionamento</li>
+                        <li><strong>Alerta Sirene:</strong> Roubo/Furto integrado ao CRM</li>
                     </ul>
                 </div>
             ` : `
