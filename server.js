@@ -284,7 +284,7 @@ async function enviarMensagem(targetJid, texto) {
     }
 }
 
-// Menus Sequenciais 1 a 6 com Requisitos e Valores Atualizados
+// Menus Sequenciais 1 a 5 com Requisitos e Valores Atualizados
 const MENUS = {
     principal: `👋 Olá! Seja muito bem-vindo(a) à *Facilita Moto*! 🏍️💨
 Locação de motos com quilometragem livre e suporte completo.
@@ -293,10 +293,9 @@ Locação de motos com quilometragem livre e suporte completo.
 
 *1* - 🏍️ Motos Disponíveis (Fila de Espera e Requisitos)
 *2* - 💳 2ª Via do PIX Semanal (Gerar código na hora)
-*3* - 🛢️ Informar Troca de Óleo (1.000 km)
-*4* - 🔓 Solicitar Desbloqueio da Moto
-*5* - 🚨 Informar Roubo ou Furto (Emergência 24h)
-*6* - 💬 Falar com Atendente Humano`,
+*3* - 🔓 Solicitar Desbloqueio da Moto
+*4* - 🚨 Informar Roubo ou Furto (Emergência 24h)
+*5* - 💬 Falar com Atendente Humano`,
 
     motos: `🏍️ *FACILITA MOTO — DISPONIBILIDADE E REQUISITOS*
 
@@ -328,11 +327,9 @@ Por favor, envie aqui o seu *Nome Completo*, *CPF* ou a *Placa da moto*:
 
     oleo: `🛢️ *INFORMAÇÕES SOBRE TROCA DE ÓLEO*
 
-⚠️ *Atenção aos prazos para preservar o motor da sua moto:*
-• A troca de óleo deve ser feita rigorosamente a cada *1.000 km rodados* (tolerância máxima de até 1.100 km).
-• Óleo recomendado: 20W-50 Mineral ou Semissintético 10W-30 conforme especificação Honda.
-• Tire uma foto nítida do painel marcando o km e do frasco do óleo e envie aqui nesta conversa para registro!
+A troca de óleo agora é realizada e autorizada *exclusivamente pela nossa oficina mecânica parceira credenciada* ou pelo painel administrativo da Facilita Moto!
 
+Para tirar dúvidas sobre a sua revisão de 1.000 km, digite *5* para falar com o atendente.
 Digite *0* para voltar ao menu principal.`,
 
     desbloqueio: `🔓 *SOLICITAÇÃO DE DESBLOQUEIO DE MOTO*
@@ -341,7 +338,7 @@ O desbloqueio automático via satélite Xtrack ocorre em até 5 minutos após a 
 
 Se você já realizou o pagamento e ainda não desbloqueou:
 1. Envie o comprovante do PIX aqui nesta conversa.
-2. Digite *6* para falar com o atendente e liberar imediatamente.
+2. Digite *5* para falar com o atendente e liberar imediatamente.
 Digite *0* para voltar ao menu principal.`,
 
     emergenciaRoubo: `🚨🚨 *CANAL DE EMERGÊNCIA — ROUBO OU FURTO* 🚨🚨
@@ -737,20 +734,20 @@ Digite *0* para voltar ao menu principal.`);
                     continue;
                 }
 
-                // Opção 3: Informar Troca de Óleo
-                if (texto === '3' || textoLower.includes('oleo') || textoLower.includes('óleo') || textoLower.includes('troca')) {
-                    await enviarMensagem(remoteJid, MENUS.oleo);
-                    continue;
-                }
-
-                // Opção 4: Solicitar Desbloqueio
-                if (texto === '4' || textoLower.includes('desbloqueio') || textoLower.includes('desbloquear')) {
+                // Opção 3: Solicitar Desbloqueio da Moto
+                if (texto === '3' || textoLower.includes('desbloqueio') || textoLower.includes('desbloquear')) {
                     await enviarMensagem(remoteJid, MENUS.desbloqueio);
                     continue;
                 }
 
-                // Opção 5: ROUBO OU FURTO (EMERGÊNCIA 24H)
-                if (texto === '5' || textoLower.includes('roubo') || textoLower.includes('furto') || textoLower.includes('emergencia') || textoLower.includes('emergência') || textoLower.includes('socorro')) {
+                // Informações sobre Troca de Óleo (Somente oficina parceira credenciada ou painel adm)
+                if (textoLower.includes('oleo') || textoLower.includes('óleo') || textoLower.includes('troca')) {
+                    await enviarMensagem(remoteJid, MENUS.oleo);
+                    continue;
+                }
+
+                // Opção 4: ROUBO OU FURTO (EMERGÊNCIA 24H)
+                if (texto === '4' || (texto === '5' && (textoLower.includes('roubo') || textoLower.includes('furto'))) || textoLower.includes('roubo') || textoLower.includes('furto') || textoLower.includes('emergencia') || textoLower.includes('emergência') || textoLower.includes('socorro')) {
                     // Responde o cliente com instruções de segurança imediatas
                     await enviarMensagem(remoteJid, MENUS.emergenciaRoubo);
 
@@ -783,7 +780,7 @@ Digite *0* para voltar ao menu principal.`);
 👤 *Condutor:* ${pushName}
 📱 *WhatsApp:* ${phoneWaMe}
 ⏰ *Hora:* ${horaSP}
-💬 *Mensagem dele:* "${textoOriginal || 'Opção 5 - Roubo/Furto'}"
+💬 *Mensagem dele:* "${textoOriginal || 'Opção 4 - Roubo/Furto'}"
 
 🟢 *A PONTE ESTÁ ATIVADA!*
 Basta responder esta mensagem aqui no seu WhatsApp!
@@ -797,8 +794,8 @@ Qualquer mensagem que você digitar agora será entregue ao condutor pelo WhatsA
                     continue;
                 }
 
-                // Opção 6: Falar com Atendente Humano (Ponte Bidirecional 24h Henrique <-> Cliente)
-                if (texto === '6' || textoLower.includes('atendente') || textoLower.includes('falar') || textoLower.includes('humano')) {
+                // Opção 5 (ou 6): Falar com Atendente Humano (Ponte Bidirecional 24h Henrique <-> Cliente)
+                if (texto === '5' || texto === '6' || textoLower.includes('atendente') || textoLower.includes('falar') || textoLower.includes('humano')) {
                     sessao.mode = 'HUMAN_SUPPORT';
                     clientSessions.set(remoteJid, sessao);
 
@@ -825,7 +822,7 @@ Pode ir digitando sua mensagem ou dúvida enquanto isso. 👇
 👤 *Cliente:* ${pushName}
 📱 *WhatsApp:* ${phoneWaMe}
 ⏰ *Horário:* ${horaSP}
-💬 *Mensagem dele:* "${textoOriginal || 'Opção 6 - Falar com Atendente'}"
+💬 *Mensagem dele:* "${textoOriginal || 'Opção 5 - Falar com Atendente'}"
 
 🟢 *A PONTE ESTÁ ATIVADA!*
 Basta responder esta mensagem aqui no seu WhatsApp!
