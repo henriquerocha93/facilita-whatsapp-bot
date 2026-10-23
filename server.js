@@ -239,16 +239,41 @@ app.post('/send-message', async (req, res) => {
     }
 
     const numLimpo = normalizarTelefone(dest);
-    const jid = `${numLimpo}@s.whatsapp.net`;
+    let targetJid = `${numLimpo}@s.whatsapp.net`;
 
     try {
-        const sent = await sock.sendMessage(jid, { text: String(msg) });
+        // Identifica no servidor do WhatsApp o JID exato (resolve o problema brasileiro do 9º dígito)
+        const checkResults = await sock.onWhatsApp(numLimpo);
+        if (checkResults && checkResults.length > 0 && checkResults[0].exists) {
+            targetJid = checkResults[0].jid;
+        } else if (numLimpo.startsWith('55') && numLimpo.length === 13) {
+            // Tenta sem o 9º dígito (55 + DDD + 8 dígitos)
+            const semNove = `${numLimpo.substring(0, 4)}${numLimpo.substring(5)}`;
+            const checkSemNove = await sock.onWhatsApp(semNove);
+            if (checkSemNove && checkSemNove.length > 0 && checkSemNove[0].exists) {
+                targetJid = checkSemNove[0].jid;
+            }
+        } else if (numLimpo.startsWith('55') && numLimpo.length === 12) {
+            // Tenta com o 9º dígito (55 + DDD + 9 + 8 dígitos)
+            const comNove = `${numLimpo.substring(0, 4)}9${numLimpo.substring(4)}`;
+            const checkComNove = await sock.onWhatsApp(comNove);
+            if (checkComNove && checkComNove.length > 0 && checkComNove[0].exists) {
+                targetJid = checkComNove[0].jid;
+            }
+        }
+    } catch (e) {
+        console.warn('onWhatsApp lookup warning:', e.message);
+    }
+
+    try {
+        console.log(`📤 Enviando mensagem para JID validado: ${targetJid}`);
+        const sent = await sock.sendMessage(targetJid, { text: String(msg) });
 
         // Se houver PIX Copia e Cola, envia como mensagem separada para facilitar copiar no celular com 1 toque
         if (pixCopiaECola && !String(msg).includes(pixCopiaECola)) {
             setTimeout(async () => {
                 try {
-                    await sock.sendMessage(jid, { text: String(pixCopiaECola).trim() });
+                    await sock.sendMessage(targetJid, { text: String(pixCopiaECola).trim() });
                 } catch (e) {}
             }, 1200);
         }
@@ -256,7 +281,8 @@ app.post('/send-message', async (req, res) => {
         return res.json({
             success: true,
             messageId: sent.key.id,
-            to: numLimpo,
+            to: targetJid.replace('@s.whatsapp.net', ''),
+            targetJid,
             timestamp: new Date().toISOString()
         });
     } catch (err) {
