@@ -30,9 +30,7 @@ const MP_ACCESS_TOKEN = 'APP_USR-6194243169013538-102220-43c64ed326354129ba6d2d5
 let henriqueJidCache = null;
 const henriqueKnownJids = new Set([
     '5551986551068@s.whatsapp.net',
-    '555186551068@s.whatsapp.net',
-    '107941151653891@lid',
-    '107941151653891'
+    '555186551068@s.whatsapp.net'
 ]);
 
 // Armazenamento Persistente de Atendimento Ativo (Ponte Relay Henrique <-> Cliente)
@@ -44,6 +42,12 @@ function carregarSuporteAtivo() {
         if (fs.existsSync(SUPPORT_FILE)) {
             const data = JSON.parse(fs.readFileSync(SUPPORT_FILE, 'utf8'));
             if (data && data.clientJid) {
+                // Não permite que o próprio Henrique fique salvo como cliente
+                if (data.clientJid.includes('51986551068') || data.clientJid.includes('5186551068')) {
+                    fs.unlinkSync(SUPPORT_FILE);
+                    activeSupport = null;
+                    return;
+                }
                 activeSupport = data;
                 console.log(`📌 [Suporte Ativo Restaurado]: ${data.clientName} (${data.clientPhone})`);
             }
@@ -428,6 +432,11 @@ async function startWhatsAppBot() {
                 let senderNumber = remoteJid.replace('@s.whatsapp.net', '').replace('@lid', '');
                 const pushName = msg.pushName || 'Cliente';
 
+                // Mapeamento exclusivo de LIDs de clientes conhecidos
+                if (remoteJid.includes('107941151653891') || senderNumber === '107941151653891') {
+                    senderNumber = '5551984843741';
+                }
+
                 // =============================================================
                 // 1. MENSAGEM ENVIADA PELO PRÓPRIO NÚMERO DA FACILITA MOTO
                 // =============================================================
@@ -444,16 +453,18 @@ async function startWhatsAppBot() {
                 }
 
                 // =============================================================
-                // 2. MENSAGEM RECEBIDA DO HENRIQUE (DONO / ATENDENTE)
+                // 2. MENSAGEM RECEBIDA DO HENRIQUE (DONO / ATENDENTE EXCLUSIVO)
                 // =============================================================
-                const isHenrique = remoteJid === henriqueJidCache ||
+                const isHenrique = !remoteJid.includes('107941151653891') && (
+                    remoteJid === henriqueJidCache ||
                     henriqueKnownJids.has(remoteJid) ||
-                    remoteJid.includes('107941151653891') ||
                     remoteJid.includes('51986551068') ||
-                    remoteJid.includes('5186551068');
+                    remoteJid.includes('5186551068')
+                );
 
                 if (isHenrique) {
                     henriqueKnownJids.add(remoteJid);
+                    henriqueJidCache = remoteJid;
                     console.log(`💬 [Mensagem do Henrique]: "${texto}" | Suporte Ativo:`, activeSupport);
 
                     // 2.1. Comandos de Controle do Administrador
@@ -473,11 +484,13 @@ async function startWhatsAppBot() {
                     if (textoLower === '#status') {
                         const isSelf = activeSupport && (
                             activeSupport.clientJid === remoteJid ||
-                            henriqueKnownJids.has(activeSupport.clientJid)
+                            henriqueKnownJids.has(activeSupport.clientJid) ||
+                            activeSupport.clientJid.includes('51986551068') ||
+                            activeSupport.clientJid.includes('5186551068')
                         );
                         const statusMsg = activeSupport && activeSupport.clientJid && !isSelf
                             ? `👤 *Cliente em Atendimento Ativo:*\n• Nome: *${activeSupport.clientName}*\n• Telefone: *${activeSupport.clientPhone}*\n\n💬 *Basta digitar qualquer mensagem aqui normalmente para falar com ele pelo WhatsApp da Facilita!*\nPara encerrar digite *#sair*.`
-                            : `Nenhum cliente externo em atendimento no momento.\nPara iniciar conversa com um cliente agora, digite *#atender [número]* (ex: #atender 51984843741).`;
+                            : `Nenhum cliente externo em atendimento no momento.\nPara iniciar conversa com um cliente agora, digite *#atender [número]* (ex: #atender 51999998888).`;
                         await enviarMensagem(remoteJid, statusMsg);
                         continue;
                     }
@@ -510,7 +523,7 @@ async function startWhatsAppBot() {
 • Qualquer mensagem de texto: Envia direto para o cliente ativo pelo WhatsApp da Facilita.
 • *#sair*: Encerra o atendimento humano e religa o robô para o cliente.
 • *#status*: Mostra quem está conectado com você.
-• *#atender [número]*: Conecta o atendimento a um cliente (ex: #atender 51984843741).
+• *#atender [número]*: Conecta o atendimento a um cliente (ex: #atender 51999998888).
 • *#leads*: Lista os clientes na fila de espera.`);
                         continue;
                     }
@@ -519,8 +532,8 @@ async function startWhatsAppBot() {
                     const isSelfClient = activeSupport && (
                         activeSupport.clientJid === remoteJid ||
                         henriqueKnownJids.has(activeSupport.clientJid) ||
-                        activeSupport.clientJid.includes('107941151653891') ||
-                        activeSupport.clientJid.includes('51986551068')
+                        activeSupport.clientJid.includes('51986551068') ||
+                        activeSupport.clientJid.includes('5186551068')
                     );
 
                     if (activeSupport && activeSupport.clientJid && !isSelfClient) {
@@ -541,7 +554,7 @@ async function startWhatsAppBot() {
                         }
                     } else {
                         if (isSelfClient) limparSuporteAtivo();
-                        await enviarMensagem(remoteJid, `Olá Henrique! Você está no canal administrativo da Facilita Moto.\nNo momento não há nenhum cliente externo em atendimento ativo.\n\n👉 Para conectar e falar com um cliente agora, digite:\n*#atender [número]* (ex: *#atender 51984843741*)\n\nAssim que você conectar, qualquer mensagem enviada aqui será repassada na hora para ele!`);
+                        await enviarMensagem(remoteJid, `Olá Henrique! Você está no canal administrativo da Facilita Moto.\nNo momento não há nenhum cliente externo em atendimento ativo.\n\n👉 Para conectar e falar com um cliente agora, digite:\n*#atender [número]* (ex: *#atender 51999998888*)\n\nAssim que você conectar, qualquer mensagem enviada aqui será repassada na hora para ele!`);
                     }
                     continue;
                 }
