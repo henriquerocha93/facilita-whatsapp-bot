@@ -30,8 +30,7 @@ const MP_ACCESS_TOKEN = 'APP_USR-6194243169013538-102220-43c64ed326354129ba6d2d5
 let henriqueJidCache = null;
 const henriqueKnownJids = new Set([
     '5551986551068@s.whatsapp.net',
-    '555186551068@s.whatsapp.net',
-    '107941151653891@lid'
+    '555186551068@s.whatsapp.net'
 ]);
 
 // Armazenamento Persistente de Atendimento Ativo (Ponte Relay Henrique <-> Cliente)
@@ -447,7 +446,6 @@ async function startWhatsAppBot() {
                 // =============================================================
                 const isHenrique = remoteJid === henriqueJidCache ||
                     henriqueKnownJids.has(remoteJid) ||
-                    remoteJid.includes('107941151653891') ||
                     remoteJid.includes('51986551068') ||
                     remoteJid.includes('5186551068');
 
