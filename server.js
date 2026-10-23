@@ -295,7 +295,7 @@ Locação de motos com quilometragem livre e suporte completo.
 *2* - 💳 2ª Via do PIX Semanal (Gerar código na hora)
 *3* - 🔓 Solicitar Desbloqueio da Moto
 *4* - 🚨 Informar Roubo ou Furto (Emergência 24h)
-*5* - 💬 Falar com Atendente Humano`,
+*5* - 💬 Falar com Atendente Humano (10h às 18h - Seg a Sáb)`,
 
     motos: `🏍️ *FACILITA MOTO — DISPONIBILIDADE E REQUISITOS*
 
@@ -352,15 +352,15 @@ Digite *0* para voltar ao menu principal.`,
 
 ⚠️ *A nossa central de monitoramento já foi acionada com prioridade máxima para bloqueio e localização satelital imediata do veículo!*`,
 
-    foraDoHorario: `🕒 *ATENDIMENTO COM ATENDENTE HUMANO*
+    foraDoHorario: `🧑‍💼 *ATENDIMENTO COM ATENDENTE HUMANO*
 
 Nosso horário de atendimento é:
 🗓️ *Segunda a Sábado: das 10h00 às 18h00*.
-🚫 Domingos e feriados: Plantão restrito a emergências.
+🚫 Fora desse período não há atendimento humano disponível.
 
-No momento estamos fora do horário de expediente. Deixe sua mensagem e dúvida aqui, e responderemos assim que abrirmos às 10h!
+No momento estamos fora do horário de expediente. Deixe sua mensagem ou dúvida aqui, e responderemos assim que abrirmos às 10h00!
 
-*(Se for emergência de roubo/furto, digite 5 para acionamento imediato).*`
+*(Se for emergência de roubo ou furto, digite 4 para acionamento imediato 24h).*`
 };
 
 async function startWhatsAppBot() {
@@ -794,8 +794,17 @@ Qualquer mensagem que você digitar agora será entregue ao condutor pelo WhatsA
                     continue;
                 }
 
-                // Opção 5 (ou 6): Falar com Atendente Humano (Ponte Bidirecional 24h Henrique <-> Cliente)
+                // Opção 5 (ou 6): Falar com Atendente Humano (10h às 18h - Seg a Sáb)
                 if (texto === '5' || texto === '6' || textoLower.includes('atendente') || textoLower.includes('falar') || textoLower.includes('humano')) {
+                    const aberto = isAtendimentoHumanoDisponivel();
+
+                    if (!aberto) {
+                        // Fora do expediente comercial: envia aviso e não abre a ponte
+                        await enviarMensagem(remoteJid, MENUS.foraDoHorario);
+                        continue;
+                    }
+
+                    // Dentro do horário (10h às 18h de Seg a Sáb): ativa a ponte direta com Henrique!
                     sessao.mode = 'HUMAN_SUPPORT';
                     clientSessions.set(remoteJid, sessao);
 
