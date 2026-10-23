@@ -383,7 +383,11 @@ async function startWhatsAppBot() {
 
                 const texto = textoOriginal.trim();
                 const textoLower = texto.toLowerCase();
-                const senderNumber = remoteJid.replace('@s.whatsapp.net', '');
+                let senderNumber = remoteJid.replace('@s.whatsapp.net', '').replace('@lid', '');
+                // Se o identificador for o LID do celular do Henrique, mapeia para o telefone real
+                if (remoteJid.includes('107941151653891') || senderNumber === '107941151653891') {
+                    senderNumber = HENRIQUE_RAW_PHONE;
+                }
                 const pushName = msg.pushName || 'Cliente';
 
                 // 1. Mensagem enviada pelo próprio aparelho da Facilita Moto
@@ -397,8 +401,9 @@ async function startWhatsAppBot() {
                     continue;
                 }
 
-                // 2. Mensagem do WhatsApp particular do Henrique (Ponte Relay)
+                // 2. Mensagem do WhatsApp particular do Henrique (Ponte Relay / Comandos)
                 const isHenrique = remoteJid === henriqueJidCache ||
+                    remoteJid.includes('107941151653891') ||
                     remoteJid.includes('51986551068') ||
                     remoteJid.includes('5186551068');
 
@@ -438,24 +443,25 @@ async function startWhatsAppBot() {
 
                     if (textoLower === '#ajuda') {
                         await enviarMensagem(remoteJid, `🛠️ *COMANDOS:*
-• Mensagem normal: Envia direto para o cliente ativo.
+• Mensagem normal (quando em atendimento): Envia direto para o cliente ativo.
 • *#sair*: Encerra o atendimento humano e religa o robô.
 • *#status*: Mostra o cliente ativo atual.
 • *#leads*: Lista os clientes na fila de espera.`);
                         continue;
                     }
 
-                    if (activeRelayClientJid) {
+                    // Se Henrique está em atendimento ativo com um cliente externo, encaminha a mensagem
+                    if (activeRelayClientJid && activeRelayClientJid !== remoteJid) {
                         const entregue = await enviarMensagem(activeRelayClientJid, texto);
                         if (entregue) {
                             console.log(`🚀 [Relay] Mensagem de Henrique entregue para ${activeRelayClientJid}`);
                         } else {
                             await enviarMensagem(remoteJid, `❌ Não foi possível entregar para o cliente.`);
                         }
-                    } else {
-                        await enviarMensagem(remoteJid, `Olá Henrique! Você não possui nenhum cliente em atendimento ativo no momento. Digite *#ajuda* para ver os comandos.`);
+                        continue;
                     }
-                    continue;
+
+                    // Se Henrique NÃO está atendendo cliente e digitou texto normal (sem #), permite que ele teste o bot!
                 }
 
                 // 3. Mensagem de um Cliente
