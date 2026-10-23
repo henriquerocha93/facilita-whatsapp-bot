@@ -225,24 +225,27 @@ async function criarPixMercadoPago(identificador = 'Cliente') {
     };
 }
 
-async function getValidatedJid(numero) {
+async function getValidatedJid(numero, ehHenrique = false) {
     if (!sock || !isConnected) return null;
     const numLimpo = normalizarTelefone(numero);
     try {
         const check = await sock.onWhatsApp(numLimpo);
         if (check && check.length > 0 && check[0].exists) {
+            if (ehHenrique && check[0].lid) henriqueKnownJids.add(check[0].lid);
             return check[0].jid;
         }
         if (numLimpo.startsWith('55') && numLimpo.length === 13) {
             const semNove = `${numLimpo.substring(0, 4)}${numLimpo.substring(5)}`;
             const checkSemNove = await sock.onWhatsApp(semNove);
             if (checkSemNove && checkSemNove.length > 0 && checkSemNove[0].exists) {
+                if (ehHenrique && checkSemNove[0].lid) henriqueKnownJids.add(checkSemNove[0].lid);
                 return checkSemNove[0].jid;
             }
         } else if (numLimpo.startsWith('55') && numLimpo.length === 12) {
             const comNove = `${numLimpo.substring(0, 4)}9${numLimpo.substring(4)}`;
             const checkComNove = await sock.onWhatsApp(comNove);
             if (checkComNove && checkComNove.length > 0 && checkComNove[0].exists) {
+                if (ehHenrique && checkComNove[0].lid) henriqueKnownJids.add(checkComNove[0].lid);
                 return checkComNove[0].jid;
             }
         }
@@ -250,6 +253,24 @@ async function getValidatedJid(numero) {
         console.warn('[JID Lookup Warning]:', e.message);
     }
     return `${numLimpo}@s.whatsapp.net`;
+}
+
+async function atualizarIdentidadesHenrique() {
+    try {
+        const c1 = await sock.onWhatsApp('5551986551068');
+        if (c1 && c1.length > 0) {
+            if (c1[0].jid) { henriqueKnownJids.add(c1[0].jid); henriqueJidCache = c1[0].jid; }
+            if (c1[0].lid) { henriqueKnownJids.add(c1[0].lid); }
+        }
+        const c2 = await sock.onWhatsApp('555186551068');
+        if (c2 && c2.length > 0) {
+            if (c2[0].jid) { henriqueKnownJids.add(c2[0].jid); if (!henriqueJidCache) henriqueJidCache = c2[0].jid; }
+            if (c2[0].lid) { henriqueKnownJids.add(c2[0].lid); }
+        }
+        console.log('👑 [Identidades Conhecidas do Henrique]:', Array.from(henriqueKnownJids));
+    } catch (e) {
+        console.warn('Erro ao atualizar identidades do Henrique:', e.message);
+    }
 }
 
 async function enviarMensagem(targetJid, texto) {
@@ -401,11 +422,7 @@ async function startWhatsAppBot() {
                 connectedPhone = sock?.user?.id?.split(':')[0] || 'Conectado';
                 console.log(`✅ [WhatsApp Bot] Conectado: ${connectedPhone}!`);
 
-                getValidatedJid(HENRIQUE_RAW_PHONE).then(jid => {
-                    henriqueJidCache = jid;
-                    if (jid) henriqueKnownJids.add(jid);
-                    console.log(`📱 [WhatsApp Bot] Telefone do Henrique: ${henriqueJidCache}`);
-                }).catch(e => console.warn('Erro ao mapear JID do Henrique:', e));
+                atualizarIdentidadesHenrique().catch(e => console.warn('Erro ao atualizar identidades:', e));
             }
         });
 
@@ -455,17 +472,26 @@ async function startWhatsAppBot() {
                 // =============================================================
                 // 2. MENSAGEM RECEBIDA DO HENRIQUE (DONO / ATENDENTE EXCLUSIVO)
                 // =============================================================
-                const isHenrique = !remoteJid.includes('107941151653891') && (
+                const ehClienteAtivo = activeSupport && (
+                    activeSupport.clientJid === remoteJid ||
+                    (activeSupport.clientPhone && remoteJid.includes(activeSupport.clientPhone)) ||
+                    remoteJid.includes('107941151653891')
+                );
+
+                const isHenrique = !ehClienteAtivo && (
                     remoteJid === henriqueJidCache ||
                     henriqueKnownJids.has(remoteJid) ||
                     remoteJid.includes('51986551068') ||
-                    remoteJid.includes('5186551068')
+                    remoteJid.includes('5186551068') ||
+                    (pushName && (pushName.toLowerCase().includes('henrique') || pushName.toLowerCase().includes('rocha'))) ||
+                    // Se o atendimento humano está ativo com um cliente externo e outra pessoa responde:
+                    (activeSupport && (Date.now() - activeSupport.startedAt < 30 * 60 * 1000) && remoteJid !== activeSupport.clientJid)
                 );
 
                 if (isHenrique) {
                     henriqueKnownJids.add(remoteJid);
                     henriqueJidCache = remoteJid;
-                    console.log(`💬 [Mensagem do Henrique]: "${texto}" | Suporte Ativo:`, activeSupport);
+                    console.log(`💬 [Mensagem do Henrique capturada]: "${texto}" de ${remoteJid} | Suporte Ativo:`, activeSupport);
 
                     // 2.1. Comandos de Controle do Administrador
                     if (textoLower === '#sair' || textoLower === '#fechar' || textoLower === '#encerrar') {
@@ -869,6 +895,16 @@ app.get('/status', (req, res) => {
         horarioAtendimentoDisponivel: isAtendimentoHumanoDisponivel(),
         uptime: process.uptime(),
         timestamp: new Date().toISOString()
+    });
+});
+
+// Endpoint de Diagnóstico e Inspeção de Identidades
+app.get('/api/debug', (req, res) => {
+    res.json({
+        henriqueKnownJids: Array.from(henriqueKnownJids),
+        henriqueJidCache,
+        activeSupport,
+        sessions: Array.from(clientSessions.entries())
     });
 });
 
