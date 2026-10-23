@@ -1091,4 +1091,14 @@ app.post('/send-message', async (req, res) => {
 
 app.listen(PORT, () => {
     console.log(`🚀 [Facilita WhatsApp Bot] Rodando na porta ${PORT}`);
+    
+    // Auto Keep-Alive anti-hibernação do Render (Evita desligamento após 15 min de inatividade)
+    setInterval(() => {
+        fetch('https://facilita-whatsapp-bot.onrender.com/status')
+            .then(r => r.json())
+            .then(d => {
+                console.log(`📡 [Keep-Alive Ping]: Status = ${d.connected ? '✅ Conectado (' + d.phone + ')' : '⚠️ Desconectado (Aguardando QR Code)'}`);
+            })
+            .catch(err => console.error('⚠️ [Keep-Alive Error]:', err.message));
+    }, 8 * 60 * 1000); // Dispara a cada 8 minutos
 });
