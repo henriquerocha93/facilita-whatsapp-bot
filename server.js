@@ -1107,6 +1107,11 @@ async function autenticarXtrack() {
     }
 }
 
+const KNOWN_FLEET_TRACKERS = {
+    'IPU2I57': { id: '00018E1B', iccid: '89555480000080813880', chip: '51986551068', modelo: 'Coban 303 / Xtrack' },
+    'IMJ6E36': { id: '00016415', iccid: '5521959604209', imei: '357746431285144', chip: '5521959604209', modelo: 'BWS NB2 (BWS IOT TIM)' }
+};
+
 async function coletarTelemetriaXtrackAoVivo() {
     try {
         const now = Date.now();
@@ -1115,55 +1120,101 @@ async function coletarTelemetriaXtrackAoVivo() {
         }
         if (!xtrackSessionCookie) return lastLiveTelemetry;
 
-        const formData = new URLSearchParams();
-        formData.append('clientes[]', '600696');
+        const vehiclesToProcess = [];
 
-        let res = await fetch('https://tela.xtrack.app.br/mapaGeral/atualizaMapa', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/x-www-form-urlencoded',
-                'Cookie': xtrackSessionCookie,
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                'Referer': 'https://tela.xtrack.app.br/mapaGeral',
-                'X-Requested-With': 'XMLHttpRequest'
-            },
-            body: formData.toString()
-        });
+        // 1. Extração Completa da Frota via dados-lista-clientes do mapaGeral
+        try {
+            const htmlRes = await fetch('https://tela.xtrack.app.br/mapaGeral', {
+                headers: {
+                    'Cookie': xtrackSessionCookie,
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                    'Referer': 'https://tela.xtrack.app.br/emp/tela'
+                }
+            });
+            const html = await htmlRes.text();
+            const idx = html.indexOf('id="dados-lista-clientes"');
+            if (idx !== -1) {
+                const start = html.indexOf('>', idx) + 1;
+                const end = html.indexOf('</div>', start);
+                const jsonStr = html.substring(start, end).trim();
+                const parsed = JSON.parse(jsonStr);
+                const regs = parsed?.registros || parsed;
+                if (regs && typeof regs === 'object') {
+                    for (const cliKey of Object.keys(regs)) {
+                        const cliObj = regs[cliKey];
+                        if (cliObj && typeof cliObj === 'object') {
+                            for (const autKey of Object.keys(cliObj)) {
+                                if (cliObj[autKey] && typeof cliObj[autKey] === 'object') {
+                                    vehiclesToProcess.push(cliObj[autKey]);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (e) {
+            console.error('⚠️ [Xtrack Bot] Erro ao extrair dados do mapaGeral:', e.message);
+        }
 
-        let json = await res.json().catch(() => null);
+        // 2. Fallback / Complemento via atualizaMapa POST
+        if (vehiclesToProcess.length === 0) {
+            const formData = new URLSearchParams();
+            formData.append('clientes[]', '600696');
 
-        if (!json || json.status !== true) {
-            console.log('🔄 [Xtrack Bot] Sessão expirou, reautenticando...');
-            const ok = await autenticarXtrack();
-            if (ok) {
-                res = await fetch('https://tela.xtrack.app.br/mapaGeral/atualizaMapa', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/x-www-form-urlencoded',
-                        'Cookie': xtrackSessionCookie,
-                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                        'Referer': 'https://tela.xtrack.app.br/mapaGeral',
-                        'X-Requested-With': 'XMLHttpRequest'
-                    },
-                    body: formData.toString()
-                });
-                json = await res.json().catch(() => null);
+            let res = await fetch('https://tela.xtrack.app.br/mapaGeral/atualizaMapa', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                    'Cookie': xtrackSessionCookie,
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                    'Referer': 'https://tela.xtrack.app.br/mapaGeral',
+                    'X-Requested-With': 'XMLHttpRequest'
+                },
+                body: formData.toString()
+            });
+
+            let json = await res.json().catch(() => null);
+
+            if (!json || json.status !== true) {
+                console.log('🔄 [Xtrack Bot] Sessão expirou, reautenticando...');
+                const ok = await autenticarXtrack();
+                if (ok) {
+                    res = await fetch('https://tela.xtrack.app.br/mapaGeral/atualizaMapa', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/x-www-form-urlencoded',
+                            'Cookie': xtrackSessionCookie,
+                            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                            'Referer': 'https://tela.xtrack.app.br/mapaGeral',
+                            'X-Requested-With': 'XMLHttpRequest'
+                        },
+                        body: formData.toString()
+                    });
+                    json = await res.json().catch(() => null);
+                }
+            }
+
+            if (json && json.status === true && Array.isArray(json.dados)) {
+                vehiclesToProcess.push(...json.dados);
             }
         }
 
-        if (json && json.status === true && Array.isArray(json.dados) && json.dados.length > 0) {
-            for (const motoData of json.dados) {
+        if (vehiclesToProcess.length > 0) {
+            for (const motoData of vehiclesToProcess) {
                 const loc = motoData.loc || [];
                 const lat = parseFloat(loc[0]);
                 const lng = parseFloat(loc[1]);
                 const vel = parseInt(motoData.ras_eve_velocidade) || 0;
                 const ignicao = parseInt(motoData.ras_eve_ignicao) === 1;
-                const odo = parseInt(motoData.ras_veiculos?.ras_vei_odometro) || 270185;
-                const placa = (motoData.ras_veiculos?.ras_vei_placa || 'IPU2I57').toUpperCase().trim();
-                const autId = String(motoData.ras_eve_aut_id || motoData.ras_veiculos?.ras_vei_id || '00018E1B').toUpperCase();
+                const odo = parseInt(motoData.ras_veiculos?.ras_vei_odometro) || 0;
+                const placa = (motoData.ras_veiculos?.ras_vei_placa || '').toUpperCase().trim();
+                const autId = String(motoData.ras_eve_aut_id || motoData.ras_veiculos?.ras_vei_id || '').toUpperCase();
 
-                if (!isNaN(lat) && !isNaN(lng)) {
-                    const prev = liveFleetTelemetries.get(placa) || liveFleetTelemetries.get(autId);
+                if (!isNaN(lat) && !isNaN(lng) && placa) {
+                    const trackerInfo = KNOWN_FLEET_TRACKERS[placa] || { id: autId, iccid: '', imei: '', chip: '' };
+                    const devId = trackerInfo.id || autId;
+
+                    const prev = liveFleetTelemetries.get(placa) || liveFleetTelemetries.get(devId) || liveFleetTelemetries.get(autId);
                     let endereco = prev?.endereco || 'Porto Alegre - RS';
                     if (!prev || Math.abs(lat - prev.lat) > 0.0003 || Math.abs(lng - prev.lng) > 0.0003) {
                         try {
@@ -1178,8 +1229,11 @@ async function coletarTelemetriaXtrackAoVivo() {
                     }
 
                     const telemetryItem = {
-                        id: autId,
-                        iccid: '89555480000080813880',
+                        id: devId,
+                        autId: autId,
+                        iccid: trackerInfo.iccid || '',
+                        imei: trackerInfo.imei || '',
+                        chip: trackerInfo.chip || '',
                         placa: placa,
                         lat: lat,
                         lng: lng,
@@ -1193,6 +1247,7 @@ async function coletarTelemetriaXtrackAoVivo() {
                     };
 
                     liveFleetTelemetries.set(placa, telemetryItem);
+                    liveFleetTelemetries.set(devId, telemetryItem);
                     liveFleetTelemetries.set(autId, telemetryItem);
                     if (placa === 'IPU2I57' || !lastLiveTelemetry) {
                         lastLiveTelemetry = telemetryItem;
@@ -1205,7 +1260,7 @@ async function coletarTelemetriaXtrackAoVivo() {
                         body: JSON.stringify(telemetryItem)
                     }).catch(() => {});
 
-                    console.log(`📡 [Xtrack Live Multi-Frota]: ${placa} (ID: ${autId}) | Lat: ${lat}, Lng: ${lng} | ${vel} km/h | Ign: ${ignicao ? 'ON' : 'OFF'} | Odo: ${odo} km`);
+                    console.log(`📡 [Xtrack Live Multi-Frota]: ${placa} (ID: ${devId} / Aut: ${autId}) | Lat: ${lat}, Lng: ${lng} | ${vel} km/h | Ign: ${ignicao ? 'ON' : 'OFF'} | Odo: ${odo} km`);
                 }
             }
         }
@@ -1225,10 +1280,12 @@ app.get('/api/tracker-live', (req, res) => {
     else if (qId && liveFleetTelemetries.has(qId)) dev = liveFleetTelemetries.get(qId);
     else dev = lastLiveTelemetry;
 
+    const uniqueFleet = Array.from(new Set(liveFleetTelemetries.values()));
     res.json({
         status: 'ok',
         device: dev,
-        fleet: Array.from(liveFleetTelemetries.values()),
+        fleet: uniqueFleet,
+        count: uniqueFleet.length,
         lastSync: dev ? dev.updatedAt : null
     });
 });
