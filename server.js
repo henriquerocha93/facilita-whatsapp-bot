@@ -28,10 +28,48 @@ let connectionAttempts = 0;
 const HENRIQUE_RAW_PHONE = '5551986551068';
 const MP_ACCESS_TOKEN = 'APP_USR-6194243169013538-102220-43c64ed326354129ba6d2d512a427b04-213948720';
 let henriqueJidCache = null;
+const henriqueKnownJids = new Set([
+    '5551986551068@s.whatsapp.net',
+    '555186551068@s.whatsapp.net',
+    '107941151653891@lid'
+]);
 
-// Armazenamento de Sessões, Emergências e Leads
+// Armazenamento Persistente de Atendimento Ativo (Ponte Relay Henrique <-> Cliente)
+const SUPPORT_FILE = path.join(__dirname, 'active_support.json');
+let activeSupport = null;
+
+function carregarSuporteAtivo() {
+    try {
+        if (fs.existsSync(SUPPORT_FILE)) {
+            const data = JSON.parse(fs.readFileSync(SUPPORT_FILE, 'utf8'));
+            if (data && data.clientJid) {
+                activeSupport = data;
+                console.log(`📌 [Suporte Ativo Restaurado]: ${data.clientName} (${data.clientPhone})`);
+            }
+        }
+    } catch (e) {}
+}
+
+function salvarSuporteAtivo(clientJid, clientPhone, clientName) {
+    activeSupport = { clientJid, clientPhone, clientName, startedAt: Date.now() };
+    try {
+        fs.writeFileSync(SUPPORT_FILE, JSON.stringify(activeSupport));
+        console.log(`💾 [Ponte Salva]: Conectado com ${clientName} (${clientPhone})`);
+    } catch (e) {}
+}
+
+function limparSuporteAtivo() {
+    activeSupport = null;
+    try {
+        if (fs.existsSync(SUPPORT_FILE)) fs.unlinkSync(SUPPORT_FILE);
+    } catch (e) {}
+}
+
+// Inicializa suporte ativo salvo em disco
+carregarSuporteAtivo();
+
+// Armazenamento em memória para sessões locais, emergências e leads
 const clientSessions = new Map();
-let activeRelayClientJid = null;
 let activeEmergencies = []; // Alertas de Roubo/Furto para o som no CRM
 let leadsFilaDeEspera = []; // Leads que entraram na fila de espera
 
@@ -360,12 +398,15 @@ async function startWhatsAppBot() {
 
                 getValidatedJid(HENRIQUE_RAW_PHONE).then(jid => {
                     henriqueJidCache = jid;
+                    if (jid) henriqueKnownJids.add(jid);
                     console.log(`📱 [WhatsApp Bot] Telefone do Henrique: ${henriqueJidCache}`);
                 }).catch(e => console.warn('Erro ao mapear JID do Henrique:', e));
             }
         });
 
-        // PROCESSAMENTO DE MENSAGENS RECEBIDAS
+        // =====================================================================
+        // PROCESSAMENTO DE MENSAGENS RECEBIDAS (CHATBOT URA + RELAY BRIDGE)
+        // =====================================================================
         sock.ev.on('messages.upsert', async ({ messages, type }) => {
             if (type !== 'notify') return;
 
@@ -384,14 +425,14 @@ async function startWhatsAppBot() {
                 const texto = textoOriginal.trim();
                 const textoLower = texto.toLowerCase();
                 let senderNumber = remoteJid.replace('@s.whatsapp.net', '').replace('@lid', '');
-                // Se o identificador for o LID do celular do Henrique, mapeia para o telefone real
-                if (remoteJid.includes('107941151653891') || senderNumber === '107941151653891') {
-                    senderNumber = HENRIQUE_RAW_PHONE;
-                }
                 const pushName = msg.pushName || 'Cliente';
 
-                // 1. Mensagem enviada pelo próprio aparelho da Facilita Moto
+                // =============================================================
+                // 1. MENSAGEM ENVIADA PELO PRÓPRIO NÚMERO DA FACILITA MOTO
+                // =============================================================
                 if (msg.key.fromMe) {
+                    // Se alguém digitou no próprio aparelho da Facilita para um cliente,
+                    // ativa o modo humano para o robô não interromper com menu
                     if (!remoteJid.includes(HENRIQUE_RAW_PHONE) && !remoteJid.includes('5186551068')) {
                         const sessao = clientSessions.get(remoteJid) || {};
                         sessao.mode = 'HUMAN_SUPPORT';
@@ -401,33 +442,51 @@ async function startWhatsAppBot() {
                     continue;
                 }
 
-                // 2. Mensagem do WhatsApp particular do Henrique (Ponte Relay / Comandos)
+                // =============================================================
+                // 2. MENSAGEM RECEBIDA DO HENRIQUE (DONO / ATENDENTE)
+                // =============================================================
                 const isHenrique = remoteJid === henriqueJidCache ||
+                    henriqueKnownJids.has(remoteJid) ||
                     remoteJid.includes('107941151653891') ||
                     remoteJid.includes('51986551068') ||
                     remoteJid.includes('5186551068');
 
                 if (isHenrique) {
-                    console.log(`💬 [Mensagem do Henrique]: "${texto}" | Alvo Ativo: ${activeRelayClientJid}`);
+                    henriqueKnownJids.add(remoteJid);
+                    console.log(`💬 [Mensagem do Henrique]: "${texto}" | Suporte Ativo:`, activeSupport);
 
+                    // 2.1. Comandos de Controle do Administrador
                     if (textoLower === '#sair' || textoLower === '#fechar' || textoLower === '#encerrar') {
-                        if (activeRelayClientJid) {
-                            await enviarMensagem(activeRelayClientJid, `✅ *Atendimento Finalizado!*\nObrigado por falar com a Facilita Moto. Se precisar de mais informações, envie qualquer mensagem para abrir o menu.`);
-                            const sessao = clientSessions.get(activeRelayClientJid);
+                        if (activeSupport && activeSupport.clientJid) {
+                            await enviarMensagem(activeSupport.clientJid, `✅ *Atendimento Finalizado!*\nA equipe da Facilita Moto agradece seu contato. Se precisar de mais informações, envie qualquer mensagem para abrir o menu.`);
+                            const sessao = clientSessions.get(activeSupport.clientJid);
                             if (sessao) sessao.mode = 'MENU';
-                            await enviarMensagem(remoteJid, `👍 Atendimento encerrado. O robô voltou a responder o cliente.`);
-                            activeRelayClientJid = null;
+                            await enviarMensagem(remoteJid, `👍 Atendimento com *${activeSupport.clientName}* (${activeSupport.clientPhone}) encerrado com sucesso. O robô automático voltou a responder por lá.`);
+                            limparSuporteAtivo();
                         } else {
-                            await enviarMensagem(remoteJid, `Nenhum cliente em atendimento ativo.`);
+                            await enviarMensagem(remoteJid, `Nenhum cliente em atendimento ativo no momento.`);
                         }
                         continue;
                     }
 
                     if (textoLower === '#status') {
-                        const statusMsg = activeRelayClientJid
-                            ? `👤 Cliente em atendimento ativo: ${activeRelayClientJid.replace('@s.whatsapp.net', '')}\nDigite qualquer mensagem normal para responder a ele ou #sair para finalizar.`
-                            : `Nenhum cliente em atendimento ativo no momento. Total de leads na fila: ${leadsFilaDeEspera.length}`;
+                        const statusMsg = activeSupport && activeSupport.clientJid
+                            ? `👤 *Cliente em Atendimento Ativo:*\n• Nome: *${activeSupport.clientName}*\n• Telefone: *${activeSupport.clientPhone}*\n\n💬 *Basta digitar qualquer mensagem aqui normalmente para falar com ele pelo WhatsApp da Facilita!*\nPara encerrar digite *#sair*.`
+                            : `Nenhum cliente em atendimento humano ativo no momento. Total de leads na fila: ${leadsFilaDeEspera.length}`;
                         await enviarMensagem(remoteJid, statusMsg);
+                        continue;
+                    }
+
+                    if (textoLower.startsWith('#atender ')) {
+                        const novoNumero = texto.replace(/#atender/i, '').trim();
+                        const novoJid = await getValidatedJid(novoNumero);
+                        const phoneFmt = formatarParaWaMe(novoNumero);
+                        salvarSuporteAtivo(novoJid, phoneFmt, `Cliente ${phoneFmt}`);
+                        const sessao = clientSessions.get(novoJid) || {};
+                        sessao.mode = 'HUMAN_SUPPORT';
+                        clientSessions.set(novoJid, sessao);
+
+                        await enviarMensagem(remoteJid, `✅ *Ponte Conectada!*\nVocê agora está conectado com o cliente: *${phoneFmt}*.\nDigite sua mensagem normalmente que ela será entregue a ele pelo WhatsApp da Facilita!`);
                         continue;
                     }
 
@@ -442,72 +501,79 @@ async function startWhatsAppBot() {
                     }
 
                     if (textoLower === '#ajuda') {
-                        await enviarMensagem(remoteJid, `🛠️ *COMANDOS:*
-• Mensagem normal (quando em atendimento): Envia direto para o cliente ativo.
-• *#sair*: Encerra o atendimento humano e religa o robô.
-• *#status*: Mostra o cliente ativo atual.
+                        await enviarMensagem(remoteJid, `🛠️ *COMANDOS DISPONÍVEIS:*
+• Qualquer mensagem de texto: Envia direto para o cliente ativo pelo WhatsApp da Facilita.
+• *#sair*: Encerra o atendimento humano e religa o robô para o cliente.
+• *#status*: Mostra quem está conectado com você.
+• *#atender [número]*: Conecta o atendimento manualmente a um número (ex: #atender 51988887777).
 • *#leads*: Lista os clientes na fila de espera.`);
                         continue;
                     }
 
-                    // Se estiver em modo de teste simulado
-                    if (activeRelayClientJid === 'SIMULATED_TEST_CLIENT') {
-                        await enviarMensagem(remoteJid, `🚀 *[RESPOSTA ENTREGUE AO CONDUTOR!]*
-O robô da Facilita Moto \`(51) 8142-9980\` entregou a sua resposta para o condutor:
-"${texto}"
+                    // 2.2. ENVIO DIRETO DA MENSAGEM DO HENRIQUE PARA O CLIENTE (RELAY BRIDGE)
+                    if (activeSupport && activeSupport.clientJid) {
+                        // Envia a mensagem para o cliente ATRAVÉS DO WHATSAPP OFICIAL DA FACILITA MOTO
+                        const entregue = await enviarMensagem(activeSupport.clientJid, textoOriginal);
 
-✅ *Ponte de Atendimento funcionando 100%!*
-(Em uma ocorrência real com outro aparelho, o condutor recebe exatamente este texto no WhatsApp dele enviado pelo número da Facilita).
-Digite *#sair* para encerrar a simulação.`);
-                        continue;
-                    }
-
-                    // Se Henrique está em atendimento ativo com um cliente externo, encaminha a mensagem
-                    if (activeRelayClientJid && activeRelayClientJid !== remoteJid) {
-                        const entregue = await enviarMensagem(activeRelayClientJid, texto);
                         if (entregue) {
-                            console.log(`🚀 [Relay] Mensagem de Henrique entregue para ${activeRelayClientJid}`);
-                        } else {
-                            await enviarMensagem(remoteJid, `❌ Não foi possível entregar para o cliente.`);
-                        }
-                        continue;
-                    }
+                            // Dá reação de check verde ✅ na mensagem do Henrique para confirmação visual imediata
+                            try {
+                                await sock.sendMessage(remoteJid, { react: { text: '✅', key: msg.key } });
+                            } catch (e) {}
 
-                    // Se Henrique NÃO está atendendo cliente e digitou texto normal (sem #), permite que ele teste o bot!
+                            // Confirmação por texto para Henrique
+                            await enviarMensagem(remoteJid, `✓ Entregue para *${activeSupport.clientName}* (${activeSupport.clientPhone}) pelo WhatsApp da Facilita!`);
+                            console.log(`🚀 [Relay] Mensagem de Henrique entregue para ${activeSupport.clientJid}`);
+                        } else {
+                            await enviarMensagem(remoteJid, `❌ Não foi possível entregar para ${activeSupport.clientPhone}. Verifique se o número existe ou tente novamente.`);
+                        }
+                    } else {
+                        await enviarMensagem(remoteJid, `Olá Henrique! Não há nenhum cliente em atendimento ativo no momento.\nQuando alguém acionar roubo/furto ou solicitar atendente, você receberá o alerta aqui na hora e a ponte será ativada automaticamente!\n\nPara iniciar atendimento manual com um número, digite *#atender [número]*.`);
+                    }
+                    continue;
                 }
 
-                // 3. Mensagem de um Cliente
+                // =============================================================
+                // 3. MENSAGEM RECEBIDA DE UM CLIENTE
+                // =============================================================
                 let sessao = clientSessions.get(remoteJid) || { mode: 'MENU', lastActive: Date.now() };
 
-                // Se o cliente estiver em Atendimento Humano
+                // 3.1. SE O CLIENTE JÁ ESTÁ EM ATENDIMENTO HUMANO
                 if (sessao.mode === 'HUMAN_SUPPORT') {
+                    // Cliente quer voltar para o menu
                     if (textoLower === 'sair' || textoLower === '#sair' || textoLower === 'menu' || textoLower === 'voltar') {
                         sessao.mode = 'MENU';
                         clientSessions.set(remoteJid, sessao);
-                        if (activeRelayClientJid === remoteJid) activeRelayClientJid = null;
+                        if (activeSupport && activeSupport.clientJid === remoteJid) {
+                            limparSuporteAtivo();
+                        }
                         await enviarMensagem(remoteJid, MENUS.principal);
 
                         const hJid = henriqueJidCache || await getValidatedJid(HENRIQUE_RAW_PHONE);
                         if (hJid) {
-                            await enviarMensagem(hJid, `ℹ️ O cliente ${pushName} (${senderNumber}) encerrou o atendimento humano e voltou ao menu.`);
+                            await enviarMensagem(hJid, `ℹ️ O cliente *${pushName}* (${senderNumber}) encerrou o atendimento humano e voltou ao menu.`);
                         }
                         continue;
                     }
 
-                    activeRelayClientJid = remoteJid;
+                    // Garante que este cliente é o cliente ativo no suporte com Henrique
+                    const phoneWaMe = formatarParaWaMe(senderNumber);
+                    salvarSuporteAtivo(remoteJid, phoneWaMe, pushName);
+
+                    // REPASSA A MENSAGEM DO CLIENTE PARA O WHATSAPP DO HENRIQUE
                     const hJid = henriqueJidCache || await getValidatedJid(HENRIQUE_RAW_PHONE);
                     if (hJid) {
-                        const alertaCliente = `📩 *[Cliente ${pushName} - ${senderNumber}]:*
-"${textoOriginal || '[Mídia ou Áudio]'}"
+                        const alertaCliente = `💬 *[Cliente ${pushName} - ${phoneWaMe}]:*
+"${textoOriginal || '[Foto ou Áudio enviado]'}"
 
-👉 *Responda aqui para falar com ele pelo WhatsApp da Facilita!*
+👉 *Basta responder esta mensagem para falar com ele pelo WhatsApp da Facilita!*
 *(Para finalizar digite #sair).*`;
                         await enviarMensagem(hJid, alertaCliente);
                     }
                     continue;
                 }
 
-                // Se o cliente estiver enviando dados para a FILA DE ESPERA (Novo Lead)
+                // 3.2. SE O CLIENTE ESTAVA ENVIANDO DADOS PARA A FILA DE ESPERA (NOVO LEAD)
                 if (sessao.mode === 'WAITING_LEAD_INFO') {
                     if (texto === '0' || textoLower === 'menu' || textoLower === 'voltar') {
                         sessao.mode = 'MENU';
@@ -520,10 +586,12 @@ Digite *#sair* para encerrar a simulação.`);
                     clientSessions.set(remoteJid, sessao);
 
                     const horaSP = getSaoPauloDate().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+                    const phoneWaMe = formatarParaWaMe(senderNumber);
+
                     const novoLead = {
                         id: `LEAD-${Date.now()}`,
                         nome: pushName,
-                        telefone: senderNumber,
+                        telefone: phoneWaMe,
                         dados: textoOriginal || 'Enviou documento/foto',
                         hora: horaSP,
                         timestamp: Date.now()
@@ -531,7 +599,6 @@ Digite *#sair* para encerrar a simulação.`);
                     leadsFilaDeEspera.unshift(novoLead);
                     if (leadsFilaDeEspera.length > 50) leadsFilaDeEspera.pop();
 
-                    // Responde o cliente confirmando a entrada na fila
                     const respCliente = `✅ *CADASTRO REALIZADO NA FILA DE ESPERA!* 🏍️📋
 
 Muito obrigado, *${pushName}*! Seus dados foram cadastrados com sucesso em nossa Fila de Espera prioritária.
@@ -543,10 +610,8 @@ Assim que uma moto for liberada para locação, entraremos em contato direto com
 Digite *0* para voltar ao menu principal.`;
                     await enviarMensagem(remoteJid, respCliente);
 
-                    // Notifica imediatamente o Henrique no WhatsApp particular como NOVO LEAD
                     const hJid = henriqueJidCache || await getValidatedJid(HENRIQUE_RAW_PHONE);
                     if (hJid) {
-                        const phoneWaMe = formatarParaWaMe(senderNumber);
                         const alertaLead = `🔥 *NOVO LEAD NA FILA DE ESPERA — FACILITA MOTO* 🔥
 👤 *Nome:* ${pushName}
 📱 *Telefone:* ${phoneWaMe}
@@ -561,7 +626,7 @@ https://wa.me/${phoneWaMe}`;
                     continue;
                 }
 
-                // Se o cliente estava aguardando envio de Nome/CPF/Placa para o PIX
+                // 3.3. SE O CLIENTE ESTAVA AGUARDANDO NOME/CPF/PLACA PARA O PIX
                 if (sessao.mode === 'WAITING_PIX_INFO') {
                     sessao.mode = 'MENU';
                     clientSessions.set(remoteJid, sessao);
@@ -599,12 +664,12 @@ Digite *0* para voltar ao menu principal.`);
                 }
 
                 // =============================================================
-                // URA SEQUENCIAL 1, 2, 3, 4, 5, 6
+                // 3.4. CHATBOT URA SEQUENCIAL 1 A 6
                 // =============================================================
                 sessao.lastActive = Date.now();
                 clientSessions.set(remoteJid, sessao);
 
-                // Opção 1: Motos Disponíveis (Informa que estão todas locadas e coloca em modo de espera)
+                // Opção 1: Motos Disponíveis
                 if (texto === '1' || textoLower.includes('motos') || textoLower.includes('disponivel') || textoLower.includes('aluguel') || textoLower.includes('valor')) {
                     sessao.mode = 'WAITING_LEAD_INFO';
                     clientSessions.set(remoteJid, sessao);
@@ -634,82 +699,48 @@ Digite *0* para voltar ao menu principal.`);
 
                 // Opção 5: ROUBO OU FURTO (EMERGÊNCIA 24H)
                 if (texto === '5' || textoLower.includes('roubo') || textoLower.includes('furto') || textoLower.includes('emergencia') || textoLower.includes('emergência') || textoLower.includes('socorro')) {
+                    // Responde o cliente com instruções de segurança imediatas
                     await enviarMensagem(remoteJid, MENUS.emergenciaRoubo);
 
+                    // Ativa o modo de Atendimento Humano para este cliente
+                    sessao.mode = 'HUMAN_SUPPORT';
+                    clientSessions.set(remoteJid, sessao);
+
                     const horaSP = getSaoPauloDate().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
-                    const isSenderAdmin = remoteJid.includes(HENRIQUE_RAW_PHONE) ||
-                        remoteJid.includes('5186551068') ||
-                        remoteJid.includes('107941151653891');
+                    const phoneWaMe = formatarParaWaMe(senderNumber);
 
-                    if (isSenderAdmin) {
-                        // TESTE REALIZADO PELO PRÓPRIO CELULAR DO HENRIQUE
-                        activeRelayClientJid = 'SIMULATED_TEST_CLIENT';
+                    // Registra e conecta este cliente na Ponte com Henrique
+                    salvarSuporteAtivo(remoteJid, phoneWaMe, pushName);
 
-                        const alertObj = {
-                            id: `EMERGENCY-${Date.now()}`,
-                            clienteNome: 'João da Silva (Simulação Admin)',
-                            clienteTelefone: '5551999998888',
-                            mensagem: 'Simulação de Roubo/Furto acionada pelo Administrador para teste de alarme e sirene',
-                            hora: horaSP,
-                            timestamp: Date.now()
-                        };
-                        activeEmergencies.unshift(alertObj);
-                        if (activeEmergencies.length > 20) activeEmergencies.pop();
+                    // Cria alerta sonoro para tocar no CRM do administrador
+                    const alertObj = {
+                        id: `EMERGENCY-${Date.now()}`,
+                        clienteNome: pushName,
+                        clienteTelefone: phoneWaMe,
+                        mensagem: textoOriginal || 'Acionou canal de Roubo/Furto',
+                        hora: horaSP,
+                        timestamp: Date.now()
+                    };
+                    activeEmergencies.unshift(alertObj);
+                    if (activeEmergencies.length > 20) activeEmergencies.pop();
 
-                        const hJid = henriqueJidCache || await getValidatedJid(HENRIQUE_RAW_PHONE);
-                        if (hJid) {
-                            const alertaSimulacao = `🚨🚨🚨 *SIMULAÇÃO DE ROUBO/FURTO (MODO TESTE)* 🚨🚨🚨
-👤 *Condutor Simulado:* João da Silva
-📱 *Telefone do Condutor:* (51) 99999-8888
+                    // Dispara Alerta de Prioridade Máxima no WhatsApp particular do Henrique
+                    const hJid = henriqueJidCache || await getValidatedJid(HENRIQUE_RAW_PHONE);
+                    if (hJid) {
+                        const alertaMaximo = `🚨🚨🚨 *ALERTA MÁXIMO: ROUBO OU FURTO ACIONADO!* 🚨🚨🚨
+👤 *Condutor:* ${pushName}
+📱 *WhatsApp:* ${phoneWaMe}
 ⏰ *Hora:* ${horaSP}
-💬 *Mensagem:* "Roubaram minha moto na Av. Assis Brasil"
+💬 *Mensagem dele:* "${textoOriginal || 'Opção 5 - Roubo/Furto'}"
 
-ℹ️ *POR QUE O LOOP ACONTECEU ANTES?*
-Como você disparou o teste do seu próprio WhatsApp particular (*51 98655-1068*), o robô achou que o "condutor roubado" era você mesmo e mandou o link do seu próprio número!
+🟢 *A PONTE ESTÁ ATIVADA!*
+Basta responder esta mensagem aqui no seu WhatsApp!
+Qualquer mensagem que você digitar agora será entregue ao condutor pelo WhatsApp da Facilita \`(51) 8142-9980\`!
 
-👉 *COMO FUNCIONA NA VIDA REAL COM UM CLIENTE:*
-• O link que chega aqui é o do cliente: https://wa.me/5551999998888
-• E quando você responde a esta mensagem aqui, sua resposta é entregue para o condutor através do WhatsApp oficial da Facilita \`(51) 8142-9980\`!
-
-👉 *TESTE A RESPOSTA AGORA:* Digite qualquer resposta aqui (ex: *"Estamos localizando pelo rastreador"*) e veja a confirmação de entrega pelo robô!`;
-                            await enviarMensagem(hJid, alertaSimulacao);
-                        }
-                    } else {
-                        // CLIENTE REAL (QUALQUER OUTRO CELULAR)
-                        sessao.mode = 'HUMAN_SUPPORT';
-                        clientSessions.set(remoteJid, sessao);
-                        activeRelayClientJid = remoteJid;
-
-                        const phoneWaMe = formatarParaWaMe(senderNumber);
-
-                        const alertObj = {
-                            id: `EMERGENCY-${Date.now()}`,
-                            clienteNome: pushName,
-                            clienteTelefone: phoneWaMe,
-                            mensagem: textoOriginal || 'Acionou canal de Roubo/Furto',
-                            hora: horaSP,
-                            timestamp: Date.now()
-                        };
-                        activeEmergencies.unshift(alertObj);
-                        if (activeEmergencies.length > 20) activeEmergencies.pop();
-
-                        const hJid = henriqueJidCache || await getValidatedJid(HENRIQUE_RAW_PHONE);
-                        if (hJid) {
-                            const alertaMaximo = `🚨🚨🚨 *ALERTA MÁXIMO: COMUNICADO DE ROUBO/FURTO* 🚨🚨🚨
-👤 *Cliente:* ${pushName}
-📱 *Número:* ${phoneWaMe}
-⏰ *Hora:* ${horaSP}
-💬 *Mensagem do condutor:* "${textoOriginal || 'Acionou opção de Roubo/Furto'}"
-
-👉 *OPÇÃO 1 — CLIQUE PARA FALAR COM O CLIENTE NO WHATSAPP:*
-https://wa.me/${phoneWaMe}
-
-👉 *OPÇÃO 2 — RESPONDA DIRETO AQUI:*
-Basta responder esta mensagem que ela será enviada ao condutor pelo WhatsApp da Facilita!
-
-⚠️ *Acesse o aplicativo da Xtrack para bloqueio e localização satelital do veículo!*`;
-                            await enviarMensagem(hJid, alertaMaximo);
-                        }
+👉 Ou clique para abrir a conversa direta: https://wa.me/${phoneWaMe}
+⚠️ Acesse o aplicativo Xtrack para bloqueio satelital imediato!
+*(Para encerrar depois, digite #sair).*`;
+                        await enviarMensagem(hJid, alertaMaximo);
                     }
                     continue;
                 }
@@ -721,25 +752,15 @@ Basta responder esta mensagem que ela será enviada ao condutor pelo WhatsApp da
                     if (!aberto) {
                         await enviarMensagem(remoteJid, MENUS.foraDoHorario);
                     } else {
+                        sessao.mode = 'HUMAN_SUPPORT';
+                        clientSessions.set(remoteJid, sessao);
+
                         const horaSP = getSaoPauloDate().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
-                        const isSenderAdmin = remoteJid.includes(HENRIQUE_RAW_PHONE) ||
-                            remoteJid.includes('5186551068') ||
-                            remoteJid.includes('107941151653891');
+                        const phoneWaMe = formatarParaWaMe(senderNumber);
 
-                        if (isSenderAdmin) {
-                            activeRelayClientJid = 'SIMULATED_TEST_CLIENT';
+                        salvarSuporteAtivo(remoteJid, phoneWaMe, pushName);
 
-                            const msgConfirmacaoCliente = `🧑‍💼 *ATENDIMENTO HUMANO — FACILITA MOTO (TESTE)*
-
-Olá Henrique! O robô acionou a simulação de atendimento humano.
-Responda qualquer mensagem para testar a ponte de envio pelo WhatsApp oficial da Facilita!`;
-                            await enviarMensagem(remoteJid, msgConfirmacaoCliente);
-                        } else {
-                            sessao.mode = 'HUMAN_SUPPORT';
-                            clientSessions.set(remoteJid, sessao);
-                            activeRelayClientJid = remoteJid;
-
-                            const msgConfirmacaoCliente = `🧑‍💼 *ATENDIMENTO HUMANO — FACILITA MOTO*
+                        const msgConfirmacaoCliente = `🧑‍💼 *ATENDIMENTO HUMANO — FACILITA MOTO*
 
 Olá ${pushName}! Você foi transferido para nossa equipe de atendimento.
 A nossa central já foi notificada e vai te responder diretamente por aqui em instantes!
@@ -747,24 +768,21 @@ A nossa central já foi notificada e vai te responder diretamente por aqui em in
 Pode ir digitando sua mensagem ou dúvida enquanto isso. 👇
 *(Para cancelar e voltar ao menu automático a qualquer momento, digite "sair").*`;
 
-                            await enviarMensagem(remoteJid, msgConfirmacaoCliente);
+                        await enviarMensagem(remoteJid, msgConfirmacaoCliente);
 
-                            const hJid = henriqueJidCache || await getValidatedJid(HENRIQUE_RAW_PHONE);
-                            if (hJid) {
-                                const phoneWaMe = formatarParaWaMe(senderNumber);
-                                const notificacaoHenrique = `🛎️ *NOVA SOLICITAÇÃO DE ATENDIMENTO HUMANO* 🛎️
+                        const hJid = henriqueJidCache || await getValidatedJid(HENRIQUE_RAW_PHONE);
+                        if (hJid) {
+                            const notificacaoHenrique = `🛎️ *NOVA SOLICITAÇÃO DE ATENDIMENTO HUMANO* 🛎️
 👤 *Cliente:* ${pushName}
 📱 *Telefone:* ${phoneWaMe}
 ⏰ *Horário:* ${horaSP}
 
-👉 *OPÇÃO 1 — CLIQUE PARA ABRIR O WHATSAPP DO CLIENTE:*
-https://wa.me/${phoneWaMe}
+🟢 *A PONTE ESTÁ ATIVADA!*
+Basta responder a esta mensagem e sua resposta será enviada ao cliente pelo WhatsApp da Facilita \`(51) 8142-9980\`!
 
-👉 *OPÇÃO 2 — RESPONDA DIRETO AQUI:*
-Você pode responder diretamente aqui no seu WhatsApp particular e sua resposta será enviada ao cliente pelo número da Facilita Moto!
-(Para encerrar digite *#sair*).`;
-                                await enviarMensagem(hJid, notificacaoHenrique);
-                            }
+👉 Ou clique para abrir a conversa direta: https://wa.me/${phoneWaMe}
+*(Para encerrar depois, basta digitar #sair).*`;
+                            await enviarMensagem(hJid, notificacaoHenrique);
                         }
                     }
                     continue;
@@ -778,7 +796,7 @@ Você pode responder diretamente aqui no seu WhatsApp particular e sua resposta 
                     continue;
                 }
 
-                // Se o usuário digitou um CPF ou Placa direto sem escolher opção, gera o PIX automaticamente
+                // Se o usuário digitou um CPF ou Placa direto, gera o PIX automaticamente
                 const ehCpf = /^\d{11}$/.test(texto.replace(/\D/g, '')) || /^\d{3}\.\d{3}\.\d{3}\-\d{2}$/.test(texto);
                 const ehPlaca = /^[a-zA-Z]{3}[0-9][a-zA-Z0-9][0-9]{2}$/.test(texto.replace(/\W/g, ''));
                 if (ehCpf || ehPlaca) {
@@ -818,7 +836,7 @@ app.get('/status', (req, res) => {
         connected: isConnected,
         phone: connectedPhone,
         hasQr: !!currentQrCodeDataUrl,
-        activeRelayClient: activeRelayClientJid ? activeRelayClientJid.replace('@s.whatsapp.net', '') : null,
+        activeSupportClient: activeSupport ? activeSupport.clientPhone : null,
         totalSessions: clientSessions.size,
         leadsCount: leadsFilaDeEspera.length,
         emergenciesCount: activeEmergencies.length,
@@ -898,7 +916,7 @@ app.get('/', (req, res) => {
         <div class="logo">
             <i class="fa-solid fa-motorcycle"></i> FACILITA MOTO
         </div>
-        <p class="subtitle">Robô URA Inteligente & Captação de Leads</p>
+        <p class="subtitle">Robô URA Inteligente & Ponte Bidirecional de Atendimento</p>
 
         <div id="status-container">
             ${isConnected ? `
@@ -910,10 +928,10 @@ app.get('/', (req, res) => {
                         <i class="fa-solid fa-robot"></i> Recursos Ativos:
                     </strong>
                     <ul style="font-size:0.85rem; color:#a7f3d0; padding-left:20px; line-height:1.6;">
-                        <li><strong>Motos 100% Locadas:</strong> Capta novos Leads na Fila de Espera</li>
-                        <li><strong>Requisitos:</strong> R$ 700 entrada (R$ 350 caução + R$ 350 semana), CNH A, Comprovante e 1 Testemunha</li>
-                        <li><strong>PIX Automático:</strong> Mercado Pago sem redirecionamento</li>
-                        <li><strong>Alerta Sirene:</strong> Roubo/Furto integrado ao CRM</li>
+                        <li><strong>Ponte Celular Ativa:</strong> Henrique responde no <code>51 98655-1068</code> e entrega no WhatsApp da Facilita</li>
+                        <li><strong>Cliente Conectado:</strong> ${activeSupport ? `<span style="color:#38bdf8;">${activeSupport.clientName} (${activeSupport.clientPhone})</span>` : 'Nenhum no momento'}</li>
+                        <li><strong>Sirene Roubo/Furto:</strong> Dispara som no CRM + Notificação instantânea</li>
+                        <li><strong>PIX Automático:</strong> Mercado Pago sem redirecionamento para site</li>
                     </ul>
                 </div>
             ` : `
