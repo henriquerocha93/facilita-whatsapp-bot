@@ -1041,20 +1041,23 @@ app.get('/', (req, res) => {
 // --- ROBÔ COLETOR 24H XTRACK / FULLTRACK (xtrack.app.br / tela.xtrack.app.br) ---
 let xtrackSessionCookie = null;
 let lastXtrackLoginTime = 0;
+let liveFleetTelemetries = new Map();
 let lastLiveTelemetry = {
     id: '00018E1B',
     iccid: '89555480000080813880',
     placa: 'IPU2I57',
-    lat: -30.018797,
-    lng: -51.206461,
-    velocidade: 13,
-    ignicao: true,
+    lat: -30.043753,
+    lng: -51.183861,
+    velocidade: 0,
+    ignicao: false,
     odometro: 270185,
     kmAtual: 270185,
     endereco: 'Rua Câncio Gomes, 664, Floresta, Porto Alegre - RS, 90220-060, Brasil',
     updatedAt: new Date().toISOString(),
     source: 'xtrack_live_crawler'
 };
+liveFleetTelemetries.set('IPU2I57', lastLiveTelemetry);
+liveFleetTelemetries.set('00018E1B', lastLiveTelemetry);
 
 async function autenticarXtrack() {
     try {
@@ -1149,52 +1152,61 @@ async function coletarTelemetriaXtrackAoVivo() {
         }
 
         if (json && json.status === true && Array.isArray(json.dados) && json.dados.length > 0) {
-            const motoData = json.dados[0];
-            const loc = motoData.loc || [];
-            const lat = parseFloat(loc[0]);
-            const lng = parseFloat(loc[1]);
-            const vel = parseInt(motoData.ras_eve_velocidade) || 0;
-            const ignicao = parseInt(motoData.ras_eve_ignicao) === 1;
-            const odo = parseInt(motoData.ras_veiculos?.ras_vei_odometro) || 270185;
-            const placa = motoData.ras_veiculos?.ras_vei_placa || 'IPU2I57';
+            for (const motoData of json.dados) {
+                const loc = motoData.loc || [];
+                const lat = parseFloat(loc[0]);
+                const lng = parseFloat(loc[1]);
+                const vel = parseInt(motoData.ras_eve_velocidade) || 0;
+                const ignicao = parseInt(motoData.ras_eve_ignicao) === 1;
+                const odo = parseInt(motoData.ras_veiculos?.ras_vei_odometro) || 270185;
+                const placa = (motoData.ras_veiculos?.ras_vei_placa || 'IPU2I57').toUpperCase().trim();
+                const autId = String(motoData.ras_eve_aut_id || motoData.ras_veiculos?.ras_vei_id || '00018E1B').toUpperCase();
 
-            if (!isNaN(lat) && !isNaN(lng)) {
-                let endereco = lastLiveTelemetry?.endereco || 'Porto Alegre - RS';
-                if (!lastLiveTelemetry || Math.abs(lat - lastLiveTelemetry.lat) > 0.0003 || Math.abs(lng - lastLiveTelemetry.lng) > 0.0003) {
-                    try {
-                        const geoRes = await fetch(`https://nominatim.openstreetmap.org/reverse?lat=${lat}&lon=${lng}&format=json`, {
-                            headers: { 'User-Agent': 'FacilitaMotoBot/1.0 (contato@facilitamoto.com.br)' }
-                        });
-                        const geoData = await geoRes.json();
-                        if (geoData && geoData.display_name) {
-                            endereco = geoData.display_name;
-                        }
-                    } catch (e) {}
+                if (!isNaN(lat) && !isNaN(lng)) {
+                    const prev = liveFleetTelemetries.get(placa) || liveFleetTelemetries.get(autId);
+                    let endereco = prev?.endereco || 'Porto Alegre - RS';
+                    if (!prev || Math.abs(lat - prev.lat) > 0.0003 || Math.abs(lng - prev.lng) > 0.0003) {
+                        try {
+                            const geoRes = await fetch(`https://nominatim.openstreetmap.org/reverse?lat=${lat}&lon=${lng}&format=json`, {
+                                headers: { 'User-Agent': 'FacilitaMotoBot/1.0 (contato@facilitamoto.com.br)' }
+                            });
+                            const geoData = await geoRes.json();
+                            if (geoData && geoData.display_name) {
+                                endereco = geoData.display_name;
+                            }
+                        } catch (e) {}
+                    }
+
+                    const telemetryItem = {
+                        id: autId,
+                        iccid: '89555480000080813880',
+                        placa: placa,
+                        lat: lat,
+                        lng: lng,
+                        velocidade: vel,
+                        ignicao: ignicao,
+                        odometro: odo,
+                        kmAtual: odo,
+                        endereco: endereco,
+                        updatedAt: new Date().toISOString(),
+                        source: 'xtrack_live_crawler'
+                    };
+
+                    liveFleetTelemetries.set(placa, telemetryItem);
+                    liveFleetTelemetries.set(autId, telemetryItem);
+                    if (placa === 'IPU2I57' || !lastLiveTelemetry) {
+                        lastLiveTelemetry = telemetryItem;
+                    }
+
+                    // Envia telemetria ao vivo para a API do CRM Vercel
+                    fetch('https://www.facilitamoto.com.br/api/telemetry', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(telemetryItem)
+                    }).catch(() => {});
+
+                    console.log(`📡 [Xtrack Live Multi-Frota]: ${placa} (ID: ${autId}) | Lat: ${lat}, Lng: ${lng} | ${vel} km/h | Ign: ${ignicao ? 'ON' : 'OFF'} | Odo: ${odo} km`);
                 }
-
-                lastLiveTelemetry = {
-                    id: '00018E1B',
-                    iccid: '89555480000080813880',
-                    placa: placa,
-                    lat: lat,
-                    lng: lng,
-                    velocidade: vel,
-                    ignicao: ignicao,
-                    odometro: odo,
-                    kmAtual: odo,
-                    endereco: endereco,
-                    updatedAt: new Date().toISOString(),
-                    source: 'xtrack_live_crawler'
-                };
-
-                // Envia telemetria ao vivo para a API do CRM Vercel
-                fetch('https://www.facilitamoto.com.br/api/telemetry', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(lastLiveTelemetry)
-                }).catch(() => {});
-
-                console.log(`📡 [Xtrack Live]: ${placa} | Lat: ${lat}, Lng: ${lng} | ${vel} km/h | Ign: ${ignicao ? 'ON' : 'OFF'} | Odo: ${odo} km`);
             }
         }
         return lastLiveTelemetry;
@@ -1204,19 +1216,27 @@ async function coletarTelemetriaXtrackAoVivo() {
     }
 }
 
-// Endpoint de Consulta em Tempo Real pelo CRM
+// Endpoint de Consulta em Tempo Real pelo CRM (Suporta Placa ou ID específico da Moto)
 app.get('/api/tracker-live', (req, res) => {
+    const qPlaca = (req.query.placa || '').toUpperCase().trim();
+    const qId = (req.query.id || '').toUpperCase().trim();
+    let dev = null;
+    if (qPlaca && liveFleetTelemetries.has(qPlaca)) dev = liveFleetTelemetries.get(qPlaca);
+    else if (qId && liveFleetTelemetries.has(qId)) dev = liveFleetTelemetries.get(qId);
+    else dev = lastLiveTelemetry;
+
     res.json({
         status: 'ok',
-        device: lastLiveTelemetry,
-        lastSync: lastLiveTelemetry ? lastLiveTelemetry.updatedAt : null
+        device: dev,
+        fleet: Array.from(liveFleetTelemetries.values()),
+        lastSync: dev ? dev.updatedAt : null
     });
 });
 
 // Endpoint para Forçar Sincronização Imediata
 app.post('/api/tracker-sync', async (req, res) => {
     const data = await coletarTelemetriaXtrackAoVivo();
-    res.json({ status: 'ok', device: data });
+    res.json({ status: 'ok', device: data, count: liveFleetTelemetries.size });
 });
 
 // Endpoint Principal de Disparo de Mensagens (/send-message) do CRM
