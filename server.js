@@ -189,6 +189,15 @@ let leadsFilaDeEspera = []; // Leads que entraram na fila de espera
 const AUTH_FOLDER = path.join(__dirname, 'auth_session');
 if (!fs.existsSync(AUTH_FOLDER)) {
     fs.mkdirSync(AUTH_FOLDER, { recursive: true });
+} else {
+    try {
+        const existingAuthFiles = fs.readdirSync(AUTH_FOLDER);
+        for (const f of existingAuthFiles) {
+            if (f.startsWith('session-')) {
+                fs.unlinkSync(path.join(AUTH_FOLDER, f));
+            }
+        }
+    } catch(e) {}
 }
 
 // =====================================================================
@@ -247,6 +256,7 @@ async function restaurarSessaoDoFirestore() {
         let count = 0;
         for (const doc of data.documents) {
             const filename = doc.fields?.filename?.stringValue;
+            if (!filename || filename.startsWith('session-')) continue;
             const b64 = doc.fields?.data?.stringValue;
             if (filename && b64) {
                 const filePath = path.join(AUTH_FOLDER, filename);
@@ -276,6 +286,7 @@ async function salvarSessaoNoFirestore() {
 
         console.log(`☁️ [Cloud Session] Sincronizando ${files.length} arquivos de sessão com o Firestore...`);
         for (const file of files) {
+            if (file.startsWith('session-')) continue; // Nunca salva sessões individuais para evitar Bad MAC de descriptografia
             const filePath = path.join(AUTH_FOLDER, file);
             if (!fs.statSync(filePath).isFile()) continue;
             const content = fs.readFileSync(filePath);
