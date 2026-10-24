@@ -75,14 +75,8 @@ function monitorarPagamentoEDesbloquear(paymentId, identificador, remoteJid) {
                 clearInterval(timer);
                 console.log(`🎉 [Auto-Desbloqueio] PIX #${paymentId} APROVADO! Desbloqueando veículo ${identificador}...`);
 
-                // Detecta qual moto desbloquear
+                // Detecta qual moto desbloquear (suporta qualquer placa do sistema)
                 let placaDetectada = (identificador || '').replace(/[^A-Za-z0-9]/g, '').toUpperCase();
-                if (!['IPU2I57', 'IMJ6E36', 'IOG2G34'].includes(placaDetectada)) {
-                    // Fallback para placa mais provável
-                    if (placaDetectada.includes('IMJ') || placaDetectada.includes('6E36')) placaDetectada = 'IMJ6E36';
-                    else if (placaDetectada.includes('IOG') || placaDetectada.includes('2G34')) placaDetectada = 'IOG2G34';
-                    else placaDetectada = 'IPU2I57';
-                }
 
                 // 1. Dispara o desbloqueio satelital na API da Facilita Moto (Xtrack)
                 try {
@@ -413,8 +407,111 @@ function gerarPayloadPixBrCode({ chavePix, nomeBeneficiario, cidade, valor, txid
 }
 
 // Gera cobrança PIX Oficial do Mercado Pago
-async function criarPixMercadoPago(identificador = 'Cliente') {
-    const valor = 350.00;
+
+// =====================================================================
+// BUSCA DINÂMICA DE TODAS AS MOTOS E CONTRATOS DO SISTEMA NO FIRESTORE
+// =====================================================================
+async function buscarVeiculoCompleto(entrada) {
+    const limpo = String(entrada || '').trim().toUpperCase();
+    const digitos = limpo.replace(/\D/g, '');
+    const placaBusca = limpo.replace(/[^A-Z0-9]/g, '');
+
+    try {
+        const [resMotos, resContratos, resClientes] = await Promise.all([
+            fetch(`https://firestore.googleapis.com/v1/projects/${FIRESTORE_PROJECT_ID}/databases/(default)/documents/crm_motos?key=${FIRESTORE_API_KEY}`).then(r => r.json()),
+            fetch(`https://firestore.googleapis.com/v1/projects/${FIRESTORE_PROJECT_ID}/databases/(default)/documents/crm_contratos?key=${FIRESTORE_API_KEY}`).then(r => r.json()),
+            fetch(`https://firestore.googleapis.com/v1/projects/${FIRESTORE_PROJECT_ID}/databases/(default)/documents/crm_clientes?key=${FIRESTORE_API_KEY}`).then(r => r.json())
+        ]);
+
+        const motos = (resMotos.documents || []).map(d => {
+            const f = d.fields || {};
+            return {
+                id: d.name.split('/').pop(),
+                placa: (f.placa?.stringValue || '').toUpperCase().replace(/[^A-Z0-9]/g, ''),
+                modelo: f.modelo?.stringValue || 'Moto',
+                rastreadorImei: f.rastreadorImei?.stringValue || ''
+            };
+        });
+
+        const clientes = (resClientes.documents || []).map(d => {
+            const f = d.fields || {};
+            return {
+                id: d.name.split('/').pop(),
+                nome: f.nome?.stringValue || 'Condutor',
+                cpf: (f.cpf?.stringValue || '').replace(/\D/g, ''),
+                telefone: (f.telefone?.stringValue || '').replace(/\D/g, '')
+            };
+        });
+
+        const contratos = (resContratos.documents || []).map(d => {
+            const f = d.fields || {};
+            const pix = f.pixCobrancaAtual?.mapValue?.fields || {};
+            const val = f.valorSemanal?.stringValue || f.valorSemanal?.integerValue || f.valorSemanal?.doubleValue || pix.valor?.stringValue || pix.valor?.integerValue || 350;
+            return {
+                id: d.name.split('/').pop(),
+                clienteId: f.clienteId?.stringValue || '',
+                clienteNome: f.clienteNome?.stringValue || pix.clienteNome?.stringValue || '',
+                motoId: f.motoId?.stringValue || '',
+                motoPlaca: (f.motoPlaca?.stringValue || pix.motoPlaca?.stringValue || '').toUpperCase().replace(/[^A-Z0-9]/g, ''),
+                valor: parseFloat(val) || 350.00,
+                status: f.status?.stringValue || 'ativo'
+            };
+        }).filter(c => c.status !== 'encerrado');
+
+        // 1. Procura por Placa
+        let motoMatch = null;
+        let contratoMatch = null;
+
+        if (placaBusca.length >= 4) {
+            motoMatch = motos.find(m => m.placa === placaBusca || m.placa.includes(placaBusca));
+            if (motoMatch) {
+                contratoMatch = contratos.find(c => c.motoPlaca === motoMatch.placa || c.motoId === motoMatch.id);
+            }
+        }
+
+        // 2. Procura por CPF
+        if (!motoMatch && digitos.length >= 8) {
+            const clienteMatch = clientes.find(cli => cli.cpf.includes(digitos) || digitos.includes(cli.cpf));
+            if (clienteMatch) {
+                contratoMatch = contratos.find(c => c.clienteId === clienteMatch.id || (c.clienteNome && c.clienteNome.toLowerCase().includes(clienteMatch.nome.toLowerCase())));
+                if (contratoMatch && contratoMatch.motoPlaca) {
+                    motoMatch = motos.find(m => m.placa === contratoMatch.motoPlaca || m.id === contratoMatch.motoId);
+                }
+            }
+        }
+
+        if (contratoMatch && !motoMatch && contratoMatch.motoPlaca) {
+            motoMatch = motos.find(m => m.placa === contratoMatch.motoPlaca);
+        }
+
+        if (motoMatch || contratoMatch) {
+            return {
+                encontrado: true,
+                placa: motoMatch?.placa || contratoMatch?.motoPlaca || placaBusca,
+                modelo: motoMatch?.modelo || 'Honda CG 150',
+                clienteNome: contratoMatch?.clienteNome || 'Condutor',
+                valor: contratoMatch?.valor || 350.00
+            };
+        }
+
+        return {
+            encontrado: false,
+            placasDisponiveis: motos.map(m => m.placa)
+        };
+    } catch (e) {
+        console.warn('Erro ao buscar veículos no Firestore:', e.message);
+        return {
+            encontrado: true,
+            placa: placaBusca || 'IPU2I57',
+            modelo: 'Honda CG 150',
+            clienteNome: 'Condutor',
+            valor: 350.00
+        };
+    }
+}
+
+async function criarPixMercadoPago(identificador = 'Cliente', valorPersonalizado = 350.00) {
+    const valor = parseFloat(valorPersonalizado) || 350.00;
     const txidUnico = `MP${Date.now().toString().slice(-10)}`;
     let pixCopiaECola = '';
 
@@ -567,7 +664,7 @@ Locação de motos com quilometragem livre e suporte completo.
 
 *1* - 🏍️ Motos Disponíveis (Fila de Espera e Requisitos)
 *2* - 💳 2ª Via do PIX Semanal (Gerar código na hora)
-*3* - 🔓 Solicitar Desbloqueio da Moto
+*3* - 🔓 Solicitar Desbloqueio da Moto (Todas as motos da frota)
 *4* - 🚨 Informar Roubo ou Furto (Emergência 24h)
 *5* - 💬 Falar com Atendente Humano (10h às 18h - Seg a Sáb)`,
 
@@ -965,18 +1062,30 @@ sock.ev.on('messages.upsert', async ({ messages, type }) => {
                         continue;
                     }
 
+                    await enviarMensagem(remoteJid, "⏳ *Consultando frota e buscando contrato no sistema... Só um instante!*");
+
+                    const veiculo = await buscarVeiculoCompleto(textoOriginal);
+
+                    if (!veiculo.encontrado) {
+                        const listaMotos = (veiculo.placasDisponiveis || []).join(', ');
+                        await enviarMensagem(remoteJid, `⚠️ *Nenhum veículo localizado com a informação "*${textoOriginal}*"!*\n\nPor favor, digite a sua placa correta ou o seu CPF.\n*(Caso precise de ajuda imediata, digite 5 para falar com o atendente).*\nDigite *0* para voltar ao menu.`);
+                        sessao.mode = 'WAITING_UNLOCK_INFO';
+                        clientSessions.set(remoteJid, sessao);
+                        continue;
+                    }
+
                     sessao.mode = 'MENU';
                     clientSessions.set(remoteJid, sessao);
 
-                    const placaOuCpf = textoOriginal.trim().toUpperCase();
-                    await enviarMensagem(remoteJid, "⏳ *Consultando moto e gerando cobrança PIX no Mercado Pago Oficial... S um instante!*");
+                    const descIdentificador = `${veiculo.placa} - ${veiculo.clienteNome}`;
+                    const pixData = await criarPixMercadoPago(descIdentificador, veiculo.valor);
 
-                    const pixData = await criarPixMercadoPago(placaOuCpf);
-                    const textoPix = `✅ *PIX DE DESBLOQUEIO GERADO COM SUCESSO!* 🏍️🔑\n\n` +
-                        `🏍️ *Veículo:* ${pixData.identificador}\n` +
-                        `💰 *Valor:* R$ ${pixData.valor}\n` +
-                        `👤 *Beneficiário:* Henrique Rocha Clavijo (Mercado Pago Oficial)\n` +
-                        `⚡ *Desbloqueio:* Imediato via satélite assim que o PIX for pago!\n\n` +
+                    const textoPix = `✅ *DADOS LOCALIZADOS COM SUCESSO!* 🏍️🔑\n\n` +
+                        `🏍️ *Veículo:* ${veiculo.placa} (${veiculo.modelo})\n` +
+                        `👤 *Locatário:* ${veiculo.clienteNome}\n` +
+                        `💰 *Valor do Desbloqueio:* R$ ${veiculo.valor.toFixed(2)}\n` +
+                        `🏦 *Beneficiário:* Henrique Rocha Clavijo (Mercado Pago Oficial)\n` +
+                        `⚡ *Desbloqueio:* Imediato via satélite Xtrack após o pagamento!\n\n` +
                         `📋 *Copie o código PIX Copia e Cola abaixo para pagar:*`;
 
                     await enviarMensagem(remoteJid, textoPix);
@@ -988,14 +1097,14 @@ sock.ev.on('messages.upsert', async ({ messages, type }) => {
                             await enviarMensagem(remoteJid, `📲 *Como funciona o Desbloqueio Automático:*\n` +
                                 `1. Abra o app do seu banco e escolha *PIX Copia e Cola*.\n` +
                                 `2. Cole o código acima e pague.\n` +
-                                `3. O Mercado Pago avisa nosso sistema e a sua moto é *DESBLOQUEADA NA HORA* via satélite! 🔓🚀\n\n` +
+                                `3. O Mercado Pago avisa nosso sistema e a sua moto *${veiculo.placa}* é *DESBLOQUEADA NA HORA* via satélite! 🔓🚀\n\n` +
                                 `*(Estamos aguardando seu pagamento. Assim que pagar, você receberá a confirmação aqui!)*\n` +
                                 `Digite *0* para voltar ao menu.`);
                         }, 800);
                     }, 500);
 
                     if (pixData.paymentId) {
-                        monitorarPagamentoEDesbloquear(pixData.paymentId, placaOuCpf, remoteJid);
+                        monitorarPagamentoEDesbloquear(pixData.paymentId, veiculo.placa, remoteJid);
                     }
                     continue;
                 }
@@ -1124,9 +1233,9 @@ Digite *0* para voltar ao menu principal.`);
                     sessao.mode = 'WAITING_UNLOCK_INFO';
                     clientSessions.set(remoteJid, sessao);
                     const msgPedePlaca = `🔓 *SOLICITAÇÃO DE DESBLOQUEIO DE MOTO* 🏍️💨\n\n` +
-                        `Para gerar o seu PIX e desbloquear a sua moto automaticamente no satélite, por favor informe:\n\n` +
-                        `👉 *Digite a PLACA da moto* (ex: *IPU2I57* ou *IMJ6E36*) ou o seu *CPF*:\n\n` +
-                        `*(Assim que o pagamento for identificado no Mercado Pago, a moto é liberada na hora!)*\n` +
+                        `Nosso sistema localiza qualquer moto da frota Facilita Moto em tempo real.\n\n` +
+                        `👉 *Digite a PLACA da sua moto* ou o seu *CPF*:\n\n` +
+                        `*(Consultaremos o seu contrato e geraremos o PIX exato para liberação satelital imediata!)*\n` +
                         `Digite *0* para voltar ao menu.`;
                     await enviarMensagem(remoteJid, msgPedePlaca);
                     continue;
