@@ -514,6 +514,7 @@ async function criarPixMercadoPago(identificador = 'Cliente', valorPersonalizado
     const valor = parseFloat(valorPersonalizado) || 350.00;
     const txidUnico = `MP${Date.now().toString().slice(-10)}`;
     let pixCopiaECola = '';
+    let paymentId = null;
 
     try {
         const mpResp = await fetch('https://api.mercadopago.com/v1/payments', {
@@ -529,7 +530,7 @@ async function criarPixMercadoPago(identificador = 'Cliente', valorPersonalizado
                 payment_method_id: 'pix',
                 payer: {
                     email: 'pagamento.cliente@facilitamoto.com.br',
-                    first_name: identificador.substring(0, 20),
+                    first_name: String(identificador || 'Condutor').substring(0, 20),
                     last_name: 'Facilita Moto'
                 }
             })
@@ -537,7 +538,12 @@ async function criarPixMercadoPago(identificador = 'Cliente', valorPersonalizado
 
         if (mpResp.ok) {
             const mpData = await mpResp.json();
+            paymentId = mpData.id ? String(mpData.id) : null;
             pixCopiaECola = mpData.point_of_interaction?.transaction_data?.qr_code || '';
+            console.log(`💳 [Mercado Pago PIX Criado]: #${paymentId} para ${identificador} - R$ ${valor}`);
+        } else {
+            const errBody = await mpResp.text();
+            console.warn('⚠️ [Mercado Pago Aviso]:', mpResp.status, errBody);
         }
     } catch (e) {
         console.warn('Erro ao chamar Mercado Pago:', e.message);
@@ -550,7 +556,7 @@ async function criarPixMercadoPago(identificador = 'Cliente', valorPersonalizado
             cidade: 'PORTO ALEGRE',
             valor: valor,
             txid: txidUnico,
-            descricao: `FACILITA ${identificador.substring(0, 10)}`
+            descricao: `FACILITA ${String(identificador).substring(0, 10)}`
         });
     }
 
@@ -1062,49 +1068,55 @@ sock.ev.on('messages.upsert', async ({ messages, type }) => {
                         continue;
                     }
 
-                    await enviarMensagem(remoteJid, "⏳ *Consultando frota e buscando contrato no sistema... Só um instante!*");
+                    try {
+                        await enviarMensagem(remoteJid, "⏳ *Consultando frota e buscando contrato no sistema... Só um instante!*");
 
-                    const veiculo = await buscarVeiculoCompleto(textoOriginal);
+                        const veiculo = await buscarVeiculoCompleto(textoOriginal);
 
-                    if (!veiculo.encontrado) {
-                        const listaMotos = (veiculo.placasDisponiveis || []).join(', ');
-                        await enviarMensagem(remoteJid, `⚠️ *Nenhum veículo localizado com a informação "*${textoOriginal}*"!*\n\nPor favor, digite a sua placa correta ou o seu CPF.\n*(Caso precise de ajuda imediata, digite 5 para falar com o atendente).*\nDigite *0* para voltar ao menu.`);
-                        sessao.mode = 'WAITING_UNLOCK_INFO';
+                        if (!veiculo || !veiculo.encontrado) {
+                            await enviarMensagem(remoteJid, `⚠️ *Nenhum veículo localizado com a informação "*${textoOriginal}*"!*\n\nPor favor, digite a sua placa correta ou o seu CPF.\n*(Caso precise de ajuda imediata, digite 5 para falar com o atendente).*\nDigite *0* para voltar ao menu.`);
+                            sessao.mode = 'WAITING_UNLOCK_INFO';
+                            clientSessions.set(remoteJid, sessao);
+                            continue;
+                        }
+
+                        sessao.mode = 'MENU';
                         clientSessions.set(remoteJid, sessao);
-                        continue;
-                    }
 
-                    sessao.mode = 'MENU';
-                    clientSessions.set(remoteJid, sessao);
+                        const descIdentificador = `${veiculo.placa} - ${veiculo.clienteNome}`;
+                        const pixData = await criarPixMercadoPago(descIdentificador, veiculo.valor);
 
-                    const descIdentificador = `${veiculo.placa} - ${veiculo.clienteNome}`;
-                    const pixData = await criarPixMercadoPago(descIdentificador, veiculo.valor);
+                        const textoPix = `✅ *DADOS LOCALIZADOS COM SUCESSO!* 🏍️🔑\n\n` +
+                            `🏍️ *Veículo:* ${veiculo.placa} (${veiculo.modelo})\n` +
+                            `👤 *Locatário:* ${veiculo.clienteNome}\n` +
+                            `💰 *Valor do Desbloqueio:* R$ ${veiculo.valor.toFixed(2)}\n` +
+                            `🏦 *Beneficiário:* Henrique Rocha Clavijo (Mercado Pago Oficial)\n` +
+                            `⚡ *Desbloqueio:* Imediato via satélite Xtrack após o pagamento!\n\n` +
+                            `📋 *Copie o código PIX Copia e Cola abaixo para pagar:*`;
 
-                    const textoPix = `✅ *DADOS LOCALIZADOS COM SUCESSO!* 🏍️🔑\n\n` +
-                        `🏍️ *Veículo:* ${veiculo.placa} (${veiculo.modelo})\n` +
-                        `👤 *Locatário:* ${veiculo.clienteNome}\n` +
-                        `💰 *Valor do Desbloqueio:* R$ ${veiculo.valor.toFixed(2)}\n` +
-                        `🏦 *Beneficiário:* Henrique Rocha Clavijo (Mercado Pago Oficial)\n` +
-                        `⚡ *Desbloqueio:* Imediato via satélite Xtrack após o pagamento!\n\n` +
-                        `📋 *Copie o código PIX Copia e Cola abaixo para pagar:*`;
-
-                    await enviarMensagem(remoteJid, textoPix);
-
-                    setTimeout(async () => {
-                        await enviarMensagem(remoteJid, pixData.pixCopiaECola);
+                        await enviarMensagem(remoteJid, textoPix);
 
                         setTimeout(async () => {
-                            await enviarMensagem(remoteJid, `📲 *Como funciona o Desbloqueio Automático:*\n` +
-                                `1. Abra o app do seu banco e escolha *PIX Copia e Cola*.\n` +
-                                `2. Cole o código acima e pague.\n` +
-                                `3. O Mercado Pago avisa nosso sistema e a sua moto *${veiculo.placa}* é *DESBLOQUEADA NA HORA* via satélite! 🔓🚀\n\n` +
-                                `*(Estamos aguardando seu pagamento. Assim que pagar, você receberá a confirmação aqui!)*\n` +
-                                `Digite *0* para voltar ao menu.`);
-                        }, 800);
-                    }, 500);
+                            await enviarMensagem(remoteJid, pixData.pixCopiaECola);
 
-                    if (pixData.paymentId) {
-                        monitorarPagamentoEDesbloquear(pixData.paymentId, veiculo.placa, remoteJid);
+                            setTimeout(async () => {
+                                await enviarMensagem(remoteJid, `📲 *Como funciona o Desbloqueio Automático:*\n` +
+                                    `1. Abra o app do seu banco e escolha *PIX Copia e Cola*.\n` +
+                                    `2. Cole o código acima e pague.\n` +
+                                    `3. O Mercado Pago avisa nosso sistema e a sua moto *${veiculo.placa}* é *DESBLOQUEADA NA HORA* via satélite! 🔓🚀\n\n` +
+                                    `*(Estamos aguardando seu pagamento. Assim que pagar, você receberá a confirmação aqui!)*\n` +
+                                    `Digite *0* para voltar ao menu.`);
+                            }, 800);
+                        }, 500);
+
+                        if (pixData.paymentId) {
+                            monitorarPagamentoEDesbloquear(pixData.paymentId, veiculo.placa, remoteJid);
+                        }
+                    } catch (errUnlock) {
+                        console.error('Erro no fluxo de desbloqueio:', errUnlock);
+                        await enviarMensagem(remoteJid, `⚠️ Ocorreu uma oscilação momentânea ao gerar a cobrança. Digite *3* para tentar novamente ou *5* para falar com o atendente.`);
+                        sessao.mode = 'MENU';
+                        clientSessions.set(remoteJid, sessao);
                     }
                     continue;
                 }
