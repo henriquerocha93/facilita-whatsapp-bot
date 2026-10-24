@@ -83,6 +83,104 @@ if (!fs.existsSync(AUTH_FOLDER)) {
     fs.mkdirSync(AUTH_FOLDER, { recursive: true });
 }
 
+// =====================================================================
+// PERSISTÊNCIA DE SESSÃO DO WHATSAPP NA NUVEM (FIRESTORE)
+// Evita perda da sessão e necessidade de novo QR Code em reinicializações do Render
+// =====================================================================
+const FIRESTORE_API_KEY = "AIzaSyDp8U3HYT_XAbZ30dSQlKoh8zw02DLeIvc";
+const FIRESTORE_PROJECT_ID = "motohub-9e839";
+const FIRESTORE_AUTH_URL = `https://firestore.googleapis.com/v1/projects/${FIRESTORE_PROJECT_ID}/databases/(default)/documents/bot_whatsapp_auth`;
+
+async function restaurarSessaoDoFirestore() {
+    try {
+        console.log('🔄 [Cloud Session] Verificando sessão salva no Firestore...');
+        const res = await fetch(`${FIRESTORE_AUTH_URL}?key=${FIRESTORE_API_KEY}`);
+        if (!res.ok) {
+            console.log('ℹ️ [Cloud Session] Nenhuma sessão no Firestore ainda (Status:', res.status, ')');
+            return false;
+        }
+        const data = await res.json();
+        if (!data.documents || data.documents.length === 0) {
+            console.log('ℹ️ [Cloud Session] Nenhuma sessão salva. Aguardando leitura do QR Code.');
+            return false;
+        }
+
+        if (!fs.existsSync(AUTH_FOLDER)) {
+            fs.mkdirSync(AUTH_FOLDER, { recursive: true });
+        }
+
+        let count = 0;
+        for (const doc of data.documents) {
+            const filename = doc.fields?.filename?.stringValue;
+            const b64 = doc.fields?.data?.stringValue;
+            if (filename && b64) {
+                const filePath = path.join(AUTH_FOLDER, filename);
+                fs.writeFileSync(filePath, Buffer.from(b64, 'base64'));
+                count++;
+            }
+        }
+        console.log(`✅ [Cloud Session] ${count} arquivos de sessão restaurados do Firestore! Reconectando sem precisar de QR Code...`);
+        return count > 0;
+    } catch (e) {
+        console.warn('⚠️ [Cloud Session] Aviso ao restaurar sessão:', e.message);
+        return false;
+    }
+}
+
+let timeoutCloudSave = null;
+function agendarSalvamentoSessaoNuvem() {
+    if (timeoutCloudSave) clearTimeout(timeoutCloudSave);
+    timeoutCloudSave = setTimeout(salvarSessaoNoFirestore, 3000);
+}
+
+async function salvarSessaoNoFirestore() {
+    try {
+        if (!fs.existsSync(AUTH_FOLDER)) return;
+        const files = fs.readdirSync(AUTH_FOLDER);
+        if (files.length === 0) return;
+
+        console.log(`☁️ [Cloud Session] Sincronizando ${files.length} arquivos de sessão com o Firestore...`);
+        for (const file of files) {
+            const filePath = path.join(AUTH_FOLDER, file);
+            if (!fs.statSync(filePath).isFile()) continue;
+            const content = fs.readFileSync(filePath);
+            const b64 = content.toString('base64');
+            const docId = file.replace(/[^a-zA-Z0-9_-]/g, '_');
+
+            await fetch(`${FIRESTORE_AUTH_URL}/${docId}?key=${FIRESTORE_API_KEY}`, {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    fields: {
+                        filename: { stringValue: file },
+                        data: { stringValue: b64 },
+                        updatedAt: { stringValue: new Date().toISOString() }
+                    }
+                })
+            });
+        }
+        console.log('✅ [Cloud Session] Sessão persistida no Firestore com sucesso!');
+    } catch (e) {
+        console.warn('⚠️ [Cloud Session] Erro ao sincronizar sessão:', e.message);
+    }
+}
+
+async function limparSessaoNoFirestore() {
+    try {
+        const res = await fetch(`${FIRESTORE_AUTH_URL}?key=${FIRESTORE_API_KEY}`);
+        const data = await res.json();
+        if (data.documents) {
+            for (const doc of data.documents) {
+                await fetch(`https://firestore.googleapis.com/v1/${doc.name}?key=${FIRESTORE_API_KEY}`, { method: 'DELETE' });
+            }
+        }
+        console.log('🗑️ [Cloud Session] Sessão removida do Firestore.');
+    } catch (e) {
+        console.warn('Erro ao limpar sessão no Firestore:', e.message);
+    }
+}
+
+
 function normalizarTelefone(numero) {
     if (!numero) return '';
     let limpo = String(numero).replace(/\D/g, '');
@@ -363,8 +461,13 @@ No momento estamos fora do horário de expediente. Deixe sua mensagem ou dúvida
 *(Se for emergência de roubo ou furto, digite 4 para acionamento imediato 24h).*`
 };
 
+let isSessionRestored = false;
 async function startWhatsAppBot() {
     try {
+        if (!isSessionRestored) {
+            await restaurarSessaoDoFirestore();
+            isSessionRestored = true;
+        }
         const { state, saveCreds } = await useMultiFileAuthState(AUTH_FOLDER);
         const { version } = await fetchLatestBaileysVersion();
 
@@ -377,7 +480,10 @@ async function startWhatsAppBot() {
             defaultQueryTimeoutMs: 60000
         });
 
-        sock.ev.on('creds.update', saveCreds);
+        sock.ev.on('creds.update', async () => {
+            await saveCreds();
+            agendarSalvamentoSessaoNuvem();
+        });
 
         sock.ev.on('connection.update', async (update) => {
             const { connection, lastDisconnect, qr } = update;
@@ -404,6 +510,7 @@ async function startWhatsAppBot() {
                     try {
                         fs.rmSync(AUTH_FOLDER, { recursive: true, force: true });
                         fs.mkdirSync(AUTH_FOLDER, { recursive: true });
+                        limparSessaoNoFirestore().catch(() => {});
                     } catch (e) {}
                 }
 
@@ -419,6 +526,7 @@ async function startWhatsAppBot() {
                 connectedPhone = sock?.user?.id?.split(':')[0] || 'Conectado';
                 console.log(`✅ [WhatsApp Bot] Conectado: ${connectedPhone}!`);
 
+                agendarSalvamentoSessaoNuvem();
                 atualizarIdentidadesHenrique().catch(e => console.warn('Erro ao atualizar identidades:', e));
             }
         });
