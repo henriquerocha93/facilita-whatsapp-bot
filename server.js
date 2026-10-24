@@ -8,6 +8,31 @@ import { fileURLToPath } from 'url';
 import makeWASocket, { DisconnectReason, useMultiFileAuthState, fetchLatestBaileysVersion } from '@whiskeysockets/baileys';
 
 // =====================================================================
+
+// =====================================================================
+// LIVE SYSTEM LOG BUFFER (ÚLTIMOS 100 LOGS EM MEMÓRIA PARA /api/logs)
+// =====================================================================
+const recentLogs = [];
+const origLog = console.log;
+const origWarn = console.warn;
+const origErr = console.error;
+
+function recordLog(level, args) {
+    try {
+        const text = args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' ');
+        recentLogs.unshift({
+            time: new Date().toLocaleTimeString('pt-BR', { hour12: false }) + '.' + String(Date.now() % 1000).padStart(3, '0'),
+            level,
+            text
+        });
+        if (recentLogs.length > 150) recentLogs.pop();
+    } catch (e) {}
+}
+
+console.log = (...args) => { recordLog('INFO', args); origLog(...args); };
+console.warn = (...args) => { recordLog('WARN', args); origWarn(...args); };
+console.error = (...args) => { recordLog('ERROR', args); origErr(...args); };
+
 // CRASH GUARD 24/7 (Proteção contra quedas do processo Node.js)
 // Garante que nenhum erro inesperado derrube o robô de emergência
 // =====================================================================
@@ -707,7 +732,37 @@ async function startWhatsAppBot() {
             }
         });
 
-        sock.ev.on('messages.upsert', async ({ messages, type }) => {
+        
+// =====================================================================
+// EXTRATOR UNIVERSAL DE TEXTO (Suporta mensagens de texto, botões, listas e efêmeras)
+// =====================================================================
+function extrairTextoMensagem(msg) {
+    if (!msg || !msg.message) return '';
+    let m = msg.message;
+    if (m.ephemeralMessage) m = m.ephemeralMessage.message || m;
+    if (m.viewOnceMessage) m = m.viewOnceMessage.message || m;
+    if (m.viewOnceMessageV2) m = m.viewOnceMessageV2.message || m;
+    if (m.documentWithCaptionMessage) m = m.documentWithCaptionMessage.message || m;
+    if (m.editedMessage?.message?.protocolMessage?.editedMessage) {
+        m = m.editedMessage.message.protocolMessage.editedMessage;
+    }
+
+    return (
+        m.conversation ||
+        m.extendedTextMessage?.text ||
+        m.imageMessage?.caption ||
+        m.videoMessage?.caption ||
+        m.buttonsResponseMessage?.selectedButtonId ||
+        m.buttonsResponseMessage?.selectedDisplayText ||
+        m.listResponseMessage?.singleSelectReply?.selectedRowId ||
+        m.listResponseMessage?.title ||
+        m.templateButtonReplyMessage?.selectedId ||
+        m.interactiveResponseMessage?.nativeFlowResponseMessage?.paramsJson ||
+        ''
+    );
+}
+
+sock.ev.on('messages.upsert', async ({ messages, type }) => {
             if (type !== 'notify') return;
 
             for (const msg of messages) {
@@ -716,11 +771,7 @@ async function startWhatsAppBot() {
                 const remoteJid = msg.key.remoteJid;
                 if (!remoteJid || remoteJid.endsWith('@g.us') || remoteJid === 'status@broadcast') continue;
 
-                const textoOriginal = msg.message.conversation ||
-                    msg.message.extendedTextMessage?.text ||
-                    msg.message.imageMessage?.caption ||
-                    msg.message.videoMessage?.caption ||
-                    '';
+                const textoOriginal = extrairTextoMensagem(msg);
 
                 const texto = textoOriginal.trim();
                 const textoLower = texto.toLowerCase();
@@ -735,17 +786,8 @@ async function startWhatsAppBot() {
                 // =============================================================
                 // 1. MENSAGEM ENVIADA PELO PRÓPRIO NÚMERO DA FACILITA MOTO
                 // =============================================================
-                if (msg.key.fromMe) {
-                    // Se alguém digitou no próprio aparelho da Facilita para um cliente,
-                    // ativa o modo humano para o robô não interromper com menu
-                    if (!remoteJid.includes(HENRIQUE_RAW_PHONE) && !remoteJid.includes('5186551068')) {
-                        const sessao = clientSessions.get(remoteJid) || {};
-                        sessao.mode = 'HUMAN_SUPPORT';
-                        sessao.lastActive = Date.now();
-                        clientSessions.set(remoteJid, sessao);
-                    }
-                    continue;
-                }
+                // Ignora mensagens enviadas pelo próprio robô para evitar loops
+                if (msg.key.fromMe) continue;
 
                 // =============================================================
                 // 2. MENSAGEM RECEBIDA DO HENRIQUE (DONO / ATENDENTE EXCLUSIVO)
@@ -867,6 +909,7 @@ async function startWhatsAppBot() {
                 // =============================================================
                 // 3. MENSAGEM RECEBIDA DE UM CLIENTE
                 // =============================================================
+                console.log("📨 [Msg Recebida]: \"" + texto + "\" de " + remoteJid + " (" + pushName + ") | Modo Atual: " + (clientSessions.get(remoteJid)?.mode || 'NOVO'));
                 let sessao = clientSessions.get(remoteJid) || { mode: 'MENU', lastActive: Date.now() };
 
                 // 3.0. PROTEÇÃO CONTRA TRAVAMENTO EM MODO HUMANO:
@@ -880,9 +923,12 @@ async function startWhatsAppBot() {
                     }
                 }
 
-                // PRIORIDADE MÁXIMA: Se o cliente digitou uma opção numérica, saudação ou palavra-chave de menu, SAI IMEDIATAMENTE do HUMAN_SUPPORT e atende na hora!
+                // PRIORIDADE MÁXIMA: Se o cliente digitou qualquer opção numérica (1 a 5), saudação ou palavra-chave, SAI IMEDIATAMENTE do HUMAN_SUPPORT e atende na hora!
+                const digitosEntrada = texto.replace(/\D/g, '');
                 const querOpcaoOuMenu = ['0', '1', '2', '3', '4', '5', '6'].includes(texto) ||
+                                       ['0', '1', '2', '3', '4', '5', '6'].includes(digitosEntrada) ||
                                        ['menu', 'sair', 'voltar', 'inicio', 'início', 'opcoes', 'opções', 'oi', 'ola', 'olá', 'bom dia', 'boa tarde', 'boa noite', 'ajuda', 'quero', 'aluguel', 'motos', 'moto'].includes(textoLower) ||
+                                       textoLower.includes('opcao') || textoLower.includes('opção') ||
                                        textoLower.includes('roubo') || textoLower.includes('furto') || textoLower.includes('socorro') || textoLower.includes('emergencia') || textoLower.includes('emergência');
 
                 if (sessao.mode === 'HUMAN_SUPPORT' && querOpcaoOuMenu) {
@@ -1050,8 +1096,15 @@ Digite *0* para voltar ao menu principal.`);
                 sessao.lastActive = Date.now();
                 clientSessions.set(remoteJid, sessao);
 
+                // Extrai dígitos isolados para matching 100% infalível de opções (ex: "1", "1.", "Opção 1", "opcao 1")
+                const digitosTexto = texto.replace(/\D/g, '');
+                const ehOpcao1 = texto === '1' || digitosTexto === '1' || textoLower.includes('opcao 1') || textoLower.includes('opção 1') || textoLower.includes('motos') || textoLower.includes('disponivel') || textoLower.includes('aluguel') || textoLower.includes('requisito');
+                const ehOpcao2 = texto === '2' || digitosTexto === '2' || textoLower.includes('opcao 2') || textoLower.includes('opção 2') || textoLower === 'pix' || textoLower.includes('segunda via') || textoLower.includes('2a via') || textoLower.includes('fatura') || textoLower.includes('pagamento');
+                const ehOpcao3 = texto === '3' || digitosTexto === '3' || textoLower.includes('opcao 3') || textoLower.includes('opção 3') || textoLower.includes('desbloqueio') || textoLower.includes('desbloquear');
+                const ehOpcao4 = texto === '4' || digitosTexto === '4' || textoLower.includes('opcao 4') || textoLower.includes('opção 4') || textoLower.includes('roubo') || textoLower.includes('furto') || textoLower.includes('emergencia') || textoLower.includes('emergência') || textoLower.includes('socorro') || textoLower.includes('assalto');
+
                 // Opção 1: Motos Disponíveis
-                if (texto === '1' || textoLower.includes('motos') || textoLower.includes('disponivel') || textoLower.includes('aluguel') || textoLower.includes('valor')) {
+                if (ehOpcao1) {
                     sessao.mode = 'WAITING_LEAD_INFO';
                     clientSessions.set(remoteJid, sessao);
                     await enviarMensagem(remoteJid, MENUS.motos);
@@ -1059,7 +1112,7 @@ Digite *0* para voltar ao menu principal.`);
                 }
 
                 // Opção 2: Segunda via do PIX
-                if (texto === '2' || textoLower === 'pix' || textoLower.includes('segunda via') || textoLower.includes('2a via') || textoLower.includes('fatura')) {
+                if (ehOpcao2) {
                     sessao.mode = 'WAITING_PIX_INFO';
                     clientSessions.set(remoteJid, sessao);
                     await enviarMensagem(remoteJid, MENUS.pedeIdentificacaoPix);
@@ -1067,7 +1120,7 @@ Digite *0* para voltar ao menu principal.`);
                 }
 
                 // Opção 3: Solicitar Desbloqueio da Moto (com PIX Mercado Pago e Desbloqueio Automático)
-                if (texto === '3' || textoLower.includes('desbloqueio') || textoLower.includes('desbloquear')) {
+                if (ehOpcao3) {
                     sessao.mode = 'WAITING_UNLOCK_INFO';
                     clientSessions.set(remoteJid, sessao);
                     const msgPedePlaca = `🔓 *SOLICITAÇÃO DE DESBLOQUEIO DE MOTO* 🏍️💨\n\n` +
@@ -1086,7 +1139,7 @@ Digite *0* para voltar ao menu principal.`);
                 }
 
                 // Opção 4: ROUBO OU FURTO (EMERGÊNCIA 24H)
-                if (texto === '4' || (texto === '5' && (textoLower.includes('roubo') || textoLower.includes('furto'))) || textoLower.includes('roubo') || textoLower.includes('furto') || textoLower.includes('emergencia') || textoLower.includes('emergência') || textoLower.includes('socorro')) {
+                if (ehOpcao4) {
                     // Responde o cliente com instruções de segurança imediatas
                     await enviarMensagem(remoteJid, MENUS.emergenciaRoubo);
 
@@ -1134,7 +1187,8 @@ Qualquer mensagem que você digitar agora será entregue ao condutor pelo WhatsA
                 }
 
                 // Opção 5 (ou 6): Falar com Atendente Humano (10h às 18h - Seg a Sáb)
-                if (texto === '5' || texto === '6' || textoLower.includes('atendente') || textoLower.includes('falar') || textoLower.includes('humano')) {
+                const ehOpcao5 = texto === '5' || texto === '6' || digitosTexto === '5' || digitosTexto === '6' || textoLower.includes('opcao 5') || textoLower.includes('opção 5') || textoLower.includes('atendente') || textoLower.includes('falar') || textoLower.includes('humano') || textoLower.includes('suporte');
+                if (ehOpcao5) {
                     const aberto = isAtendimentoHumanoDisponivel();
 
                     if (!aberto) {
@@ -1233,6 +1287,10 @@ app.all('/api/clear-sessions', (req, res) => {
     clientSessions.clear();
     activeSupport = null;
     res.json({ ok: true, cleared: total, message: 'Todas as sessões de clientes foram resetadas para o MENU com sucesso!' });
+});
+
+app.get('/api/logs', (req, res) => {
+    res.json({ count: recentLogs.length, logs: recentLogs });
 });
 
 app.get('/status', (req, res) => {
