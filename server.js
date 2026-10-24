@@ -180,6 +180,33 @@ const FIRESTORE_API_KEY = "AIzaSyDp8U3HYT_XAbZ30dSQlKoh8zw02DLeIvc";
 const FIRESTORE_PROJECT_ID = "motohub-9e839";
 const FIRESTORE_AUTH_URL = `https://firestore.googleapis.com/v1/projects/${FIRESTORE_PROJECT_ID}/databases/(default)/documents/bot_whatsapp_auth`;
 
+
+const FIRESTORE_EMERGENCIAS_URL = "https://firestore.googleapis.com/v1/projects/" + FIRESTORE_PROJECT_ID + "/databases/(default)/documents/alertas_emergencia";
+
+async function salvarEmergenciaNoFirestore(alertObj) {
+    try {
+        const docId = alertObj.id || ("EMERGENCY-" + Date.now());
+        const res = await fetch(FIRESTORE_EMERGENCIAS_URL + "/" + docId + "?key=" + FIRESTORE_API_KEY, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                fields: {
+                    id: { stringValue: docId },
+                    clienteNome: { stringValue: alertObj.clienteNome || 'Cliente' },
+                    clienteTelefone: { stringValue: alertObj.clienteTelefone || '' },
+                    mensagem: { stringValue: alertObj.mensagem || '' },
+                    hora: { stringValue: alertObj.hora || '' },
+                    timestamp: { integerValue: String(alertObj.timestamp || Date.now()) },
+                    status: { stringValue: 'PENDENTE' }
+                }
+            })
+        });
+        console.log("🚨 [Firestore] Alerta de emergência salvo na nuvem com status " + res.status + ": " + docId);
+    } catch (e) {
+        console.warn('Erro ao salvar emergência no Firestore:', e.message);
+    }
+}
+
 async function restaurarSessaoDoFirestore() {
     try {
         console.log('🔄 [Cloud Session] Verificando sessão salva no Firestore...');
@@ -415,6 +442,9 @@ async function criarPixMercadoPago(identificador = 'Cliente') {
 
 async function getValidatedJid(numero, ehHenrique = false) {
     if (!sock || !isConnected) return null;
+    if (typeof numero === "string" && (numero.endsWith("@s.whatsapp.net") || numero.endsWith("@lid"))) {
+        return numero;
+    }
     const numLimpo = normalizarTelefone(numero);
     try {
         const check = await sock.onWhatsApp(numLimpo);
@@ -459,6 +489,37 @@ async function atualizarIdentidadesHenrique() {
     } catch (e) {
         console.warn('Erro ao atualizar identidades do Henrique:', e.message);
     }
+}
+
+
+// =====================================================================
+// DISPARADOR ROBUSTO DE NOTIFICAÇÃO PARA O HENRIQUE (TODOS OS JIDS/LIDS)
+// =====================================================================
+async function notificarHenrique(mensagem) {
+    const targets = new Set([
+        '5551986551068@s.whatsapp.net',
+        '555186551068@s.whatsapp.net',
+        '144543030767616@lid'
+    ]);
+    if (henriqueJidCache) targets.add(henriqueJidCache);
+    for (const jid of henriqueKnownJids) {
+        if (jid) targets.add(jid);
+    }
+
+    let entregueAlgum = false;
+    for (const jid of targets) {
+        if (!jid) continue;
+        try {
+            const ok = await sock.sendMessage(jid, { text: mensagem });
+            if (ok) {
+                console.log("📲 [Notificação Henrique]: Entregue com sucesso para " + jid);
+                entregueAlgum = true;
+            }
+        } catch (e) {
+            console.warn("[Notificação Henrique Warning] Falha ao enviar para " + jid + ": " + e.message);
+        }
+    }
+    return entregueAlgum;
 }
 
 async function enviarMensagem(targetJid, texto) {
@@ -700,9 +761,7 @@ async function startWhatsAppBot() {
                     henriqueKnownJids.has(remoteJid) ||
                     remoteJid.includes('51986551068') ||
                     remoteJid.includes('5186551068') ||
-                    (pushName && (pushName.toLowerCase().includes('henrique') || pushName.toLowerCase().includes('rocha'))) ||
-                    // Se o atendimento humano está ativo com um cliente externo e outra pessoa responde:
-                    (activeSupport && (Date.now() - activeSupport.startedAt < 30 * 60 * 1000) && remoteJid !== activeSupport.clientJid)
+                    remoteJid.includes('144543030767616')
                 );
 
                 if (isHenrique) {
@@ -797,9 +856,12 @@ async function startWhatsAppBot() {
                         }
                     } else {
                         if (isSelfClient) limparSuporteAtivo();
-                        await enviarMensagem(remoteJid, `Olá Henrique! Você está no canal administrativo da Facilita Moto.\nNo momento não há nenhum cliente externo em atendimento ativo.\n\n👉 Para conectar e falar com um cliente agora, digite:\n*#atender [número]* (ex: *#atender 51999998888*)\n\nAssim que você conectar, qualquer mensagem enviada aqui será repassada na hora para ele!`);
+                        if (texto.startsWith("#")) {
+                            await enviarMensagem(remoteJid, `Olá Henrique! Você está no canal administrativo da Facilita Moto.\nNo momento não há nenhum cliente externo em atendimento ativo.\n\n👉 Para conectar e falar com um cliente agora, digite:\n*#atender [número]* (ex: *#atender 51999998888*)\n\nAssim que você conectar, qualquer mensagem enviada aqui será repassada na hora para ele!`);
+                            continue;
+                        }
+                        console.log("🧪 [Teste Admin]: Henrique digitou \"" + texto + "\". Prosseguindo para fluxo de atendimento do bot.");
                     }
-                    continue;
                 }
 
                 // =============================================================
@@ -842,12 +904,9 @@ async function startWhatsAppBot() {
                     // AVISA O CLIENTE IMEDIATAMENTE (nunca deixa o cliente no vácuo sem resposta!)
                     await enviarMensagem(remoteJid, '📩 *Mensagem recebida e repassada ao atendente!*\nEm instantes responderemos por aqui.\n\n*(Se preferir ver as opções automáticas e valores agora, digite "menu" ou "0").*');
 
-                    // REPASSA A MENSAGEM DO CLIENTE PARA O WHATSAPP DO HENRIQUE
-                    const hJid = henriqueJidCache || await getValidatedJid(HENRIQUE_RAW_PHONE);
-                    if (hJid) {
-                        const alertaCliente = '👤 *[Cliente ' + pushName + ' - ' + phoneWaMe + ']:*\n"' + (textoOriginal || '[Foto ou Áudio enviado]') + '"\n\n👉 *Basta responder esta mensagem para falar com ele pelo WhatsApp da Facilita!*\n*(Para finalizar digite #sair).*';
-                        await enviarMensagem(hJid, alertaCliente);
-                    }
+                    // REPASSA A MENSAGEM DO CLIENTE PARA O WHATSAPP DO HENRIQUE COM REDUNDÂNCIA TOTAL
+                    const alertaCliente = '👤 *[Cliente ' + pushName + ' - ' + phoneWaMe + ']:*\n"' + (textoOriginal || '[Foto ou Áudio enviado]') + '"\n\n👉 *Basta responder esta mensagem para falar com ele pelo WhatsApp da Facilita!*\n*(Para finalizar digite #sair).*';
+                    await notificarHenrique(alertaCliente);
                     continue;
                 }
 
@@ -1053,10 +1112,11 @@ Digite *0* para voltar ao menu principal.`);
                     activeEmergencies.unshift(alertObj);
                     if (activeEmergencies.length > 20) activeEmergencies.pop();
 
-                    // Dispara Alerta de Prioridade Máxima no WhatsApp particular do Henrique
-                    const hJid = henriqueJidCache || await getValidatedJid(HENRIQUE_RAW_PHONE);
-                    if (hJid) {
-                        const alertaMaximo = `🚨🚨🚨 *ALERTA MÁXIMO: ROUBO OU FURTO ACIONADO!* 🚨🚨🚨
+                    // Salva alerta no Firestore para disparar sirene e notificação no CRM Desktop e Mobile
+                    salvarEmergenciaNoFirestore(alertObj).catch(() => {});
+
+                    // Dispara Alerta de Prioridade Máxima no WhatsApp particular do Henrique (com redundância de JIDs)
+                    const alertaMaximo = `🚨🚨🚨 *ALERTA MÁXIMO: ROUBO OU FURTO ACIONADO!* 🚨🚨🚨
 👤 *Condutor:* ${pushName}
 📱 *WhatsApp:* ${phoneWaMe}
 ⏰ *Hora:* ${horaSP}
@@ -1069,8 +1129,7 @@ Qualquer mensagem que você digitar agora será entregue ao condutor pelo WhatsA
 👉 Ou clique para abrir a conversa direta: https://wa.me/${phoneWaMe}
 ⚠️ Acesse o aplicativo Xtrack para bloqueio satelital imediato!
 *(Para encerrar depois, digite #sair).*`;
-                        await enviarMensagem(hJid, alertaMaximo);
-                    }
+                    await notificarHenrique(alertaMaximo);
                     continue;
                 }
 
