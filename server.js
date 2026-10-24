@@ -7,6 +7,18 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import makeWASocket, { DisconnectReason, useMultiFileAuthState, fetchLatestBaileysVersion } from '@whiskeysockets/baileys';
 
+// =====================================================================
+// CRASH GUARD 24/7 (Proteção contra quedas do processo Node.js)
+// Garante que nenhum erro inesperado derrube o robô de emergência
+// =====================================================================
+process.on('uncaughtException', (err) => {
+    console.error('🛡️ [Crash Guard 24h] Exceção capturada com segurança:', err?.message || err);
+});
+process.on('unhandledRejection', (reason) => {
+    console.error('🛡️ [Crash Guard 24h] Rejeição de Promise capturada:', reason?.message || reason);
+});
+
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
@@ -1454,6 +1466,48 @@ app.post('/send-message', async (req, res) => {
         });
     }
 });
+
+
+// =====================================================================
+// WATCHDOG & HEARTBEAT 24/7 PARA EMERGÊNCIA DE ROUBO/FURTO
+// =====================================================================
+// 1. Presença ativa contínua a cada 30 segundos para o WhatsApp não derrubar o socket
+setInterval(async () => {
+    if (isConnected && sock) {
+        try {
+            await sock.sendPresenceUpdate('available');
+        } catch (e) {}
+    }
+}, 30 * 1000);
+
+// 2. Watchdog anti-queda: se desconectar por mais de 30 segundos, força reconexão imediata
+let tempoUltimaConexaoAtiva = Date.now();
+setInterval(() => {
+    if (isConnected) {
+        tempoUltimaConexaoAtiva = Date.now();
+    } else {
+        const tempoFora = Date.now() - tempoUltimaConexaoAtiva;
+        if (tempoFora > 35000) {
+            console.log(`🛡️ [Watchdog 24h Emergência] Bot offline há ${Math.round(tempoFora / 1000)}s. Acionando reconexão forçada imediata...`);
+            tempoUltimaConexaoAtiva = Date.now();
+            try {
+                if (sock) {
+                    try { sock.end(); } catch (e) {}
+                }
+                startWhatsAppBot();
+            } catch (err) {
+                console.error('Erro no Watchdog ao reconectar:', err);
+            }
+        }
+    }
+}, 15 * 1000);
+
+// 3. Auto Keep-Alive interno a cada 3 minutos (Render nunca hiberna)
+setInterval(async () => {
+    try {
+        await fetch('https://facilita-whatsapp-bot.onrender.com/ping');
+    } catch (e) {}
+}, 3 * 60 * 1000);
 
 app.listen(PORT, () => {
     console.log(`🚀 [Facilita WhatsApp Bot] Rodando na porta ${PORT}`);
