@@ -546,6 +546,28 @@ async function startWhatsAppBot() {
         // =====================================================================
         // PROCESSAMENTO DE MENSAGENS RECEBIDAS (CHATBOT URA + RELAY BRIDGE)
         // =====================================================================
+        
+        // =====================================================================
+        // TRATAMENTO DE CHAMADAS DE VOZ / VÍDEO RECEBIDAS NO WHATSAPP
+        // =====================================================================
+        sock.ev.on('call', async (calls) => {
+            for (const call of calls) {
+                if (call.status === 'offer') {
+                    console.log(`📞 [Chamada de Voz/Vídeo]: Recebida de ${call.from}`);
+                    try {
+                        const sessao = clientSessions.get(call.from) || { mode: 'MENU', lastActive: Date.now() };
+                        sessao.mode = 'MENU';
+                        sessao.lastActive = Date.now();
+                        clientSessions.set(call.from, sessao);
+
+                        await enviarMensagem(call.from, "Olá! 👋 Nosso atendimento por este número é 100% digital e automatizado por mensagens.\n\nComo posso te ajudar agora? Escolha uma opção:\n\n" + MENUS.principal);
+                    } catch (e) {
+                        console.error('Erro ao responder chamada de voz:', e);
+                    }
+                }
+            }
+        });
+
         sock.ev.on('messages.upsert', async ({ messages, type }) => {
             if (type !== 'notify') return;
 
@@ -707,36 +729,45 @@ async function startWhatsAppBot() {
                 // =============================================================
                 let sessao = clientSessions.get(remoteJid) || { mode: 'MENU', lastActive: Date.now() };
 
-                // 3.1. SE O CLIENTE JÁ ESTÁ EM ATENDIMENTO HUMANO
-                if (sessao.mode === 'HUMAN_SUPPORT') {
-                    // Cliente quer voltar para o menu
-                    if (textoLower === 'sair' || textoLower === '#sair' || textoLower === 'menu' || textoLower === 'voltar') {
-                        sessao.mode = 'MENU';
-                        clientSessions.set(remoteJid, sessao);
-                        if (activeSupport && activeSupport.clientJid === remoteJid) {
-                            limparSuporteAtivo();
-                        }
-                        await enviarMensagem(remoteJid, MENUS.principal);
-
-                        const hJid = henriqueJidCache || await getValidatedJid(HENRIQUE_RAW_PHONE);
-                        if (hJid) {
-                            await enviarMensagem(hJid, `ℹ️ O cliente *${pushName}* (${senderNumber}) encerrou o atendimento humano e voltou ao menu.`);
-                        }
-                        continue;
+                // 3.0. PROTEÇÃO CONTRA TRAVAMENTO EM MODO HUMANO:
+                // Se o cliente ficou inativo por mais de 15 minutos, volta AUTOMATICAMENTE para o menu
+                const tempoInativo = Date.now() - (sessao.lastActive || 0);
+                if (sessao.mode === 'HUMAN_SUPPORT' && tempoInativo > 15 * 60 * 1000) {
+                    console.log(`⏱️ [Sessão Expirada]: ${remoteJid} inativo há mais de 15min. Retornando ao MENU.`);
+                    sessao.mode = 'MENU';
+                    if (activeSupport && activeSupport.clientJid === remoteJid) {
+                        limparSuporteAtivo();
                     }
+                }
 
+                // PRIORIDADE MÁXIMA: Se o cliente digitou uma opção numérica, saudação ou palavra-chave de menu, SAI IMEDIATAMENTE do HUMAN_SUPPORT e atende na hora!
+                const querOpcaoOuMenu = ['0', '1', '2', '3', '4', '5', '6'].includes(texto) ||
+                                       ['menu', 'sair', 'voltar', 'inicio', 'início', 'opcoes', 'opções', 'oi', 'ola', 'olá', 'bom dia', 'boa tarde', 'boa noite', 'ajuda', 'quero', 'aluguel', 'motos', 'moto'].includes(textoLower) ||
+                                       textoLower.includes('roubo') || textoLower.includes('furto') || textoLower.includes('socorro') || textoLower.includes('emergencia') || textoLower.includes('emergência');
+
+                if (sessao.mode === 'HUMAN_SUPPORT' && querOpcaoOuMenu) {
+                    console.log(`🔄 [Sessão Reset]: Cliente ${remoteJid} digitou "${texto}". Alternando de HUMAN_SUPPORT para MENU.`);
+                    sessao.mode = 'MENU';
+                    if (activeSupport && activeSupport.clientJid === remoteJid) {
+                        limparSuporteAtivo();
+                    }
+                }
+
+                // 3.1. SE O CLIENTE REALMENTE ESTÁ EM ATENDIMENTO HUMANO ATIVO (conversando agora)
+                if (sessao.mode === 'HUMAN_SUPPORT') {
                     // Garante que este cliente é o cliente ativo no suporte com Henrique
                     const phoneWaMe = formatarParaWaMe(senderNumber);
                     salvarSuporteAtivo(remoteJid, phoneWaMe, pushName);
+                    sessao.lastActive = Date.now();
+                    clientSessions.set(remoteJid, sessao);
+
+                    // AVISA O CLIENTE IMEDIATAMENTE (nunca deixa o cliente no vácuo sem resposta!)
+                    await enviarMensagem(remoteJid, '📩 *Mensagem recebida e repassada ao atendente!*\nEm instantes responderemos por aqui.\n\n*(Se preferir ver as opções automáticas e valores agora, digite "menu" ou "0").*');
 
                     // REPASSA A MENSAGEM DO CLIENTE PARA O WHATSAPP DO HENRIQUE
                     const hJid = henriqueJidCache || await getValidatedJid(HENRIQUE_RAW_PHONE);
                     if (hJid) {
-                        const alertaCliente = `💬 *[Cliente ${pushName} - ${phoneWaMe}]:*
-"${textoOriginal || '[Foto ou Áudio enviado]'}"
-
-👉 *Basta responder esta mensagem para falar com ele pelo WhatsApp da Facilita!*
-*(Para finalizar digite #sair).*`;
+                        const alertaCliente = '👤 *[Cliente ' + pushName + ' - ' + phoneWaMe + ']:*\n"' + (textoOriginal || '[Foto ou Áudio enviado]') + '"\n\n👉 *Basta responder esta mensagem para falar com ele pelo WhatsApp da Facilita!*\n*(Para finalizar digite #sair).*';
                         await enviarMensagem(hJid, alertaCliente);
                     }
                     continue;
@@ -1007,6 +1038,15 @@ Qualquer mensagem que você digitar agora será entregue ao cliente pelo WhatsAp
 startWhatsAppBot();
 
 // Endpoint de Status JSON
+
+// Endpoint para Resetar Sessões de Clientes Travadas
+app.all('/api/clear-sessions', (req, res) => {
+    const total = clientSessions.size;
+    clientSessions.clear();
+    activeSupport = null;
+    res.json({ ok: true, cleared: total, message: 'Todas as sessões de clientes foram resetadas para o MENU com sucesso!' });
+});
+
 app.get('/status', (req, res) => {
     res.json({
         connected: isConnected,
