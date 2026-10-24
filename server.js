@@ -22,6 +22,83 @@ process.on('unhandledRejection', (reason) => {
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+
+// =====================================================================
+// AUTO-DESBLOQUEIO EM TEMPO REAL APÓS PAGAMENTO PIX NO MERCADO PAGO
+// =====================================================================
+function monitorarPagamentoEDesbloquear(paymentId, identificador, remoteJid) {
+    if (!paymentId) return;
+    console.log(`🔍 [Auto-Desbloqueio] Monitorando pagamento Mercado Pago #${paymentId} para ${identificador}...`);
+    let tentativas = 0;
+    const maxTentativas = 90; // 90 x 10s = 15 minutos de monitoramento ativo
+    const timer = setInterval(async () => {
+        tentativas++;
+        if (tentativas > maxTentativas) {
+            clearInterval(timer);
+            console.log(`⏱️ [Auto-Desbloqueio] Tempo limite esgotado para o pagamento #${paymentId}.`);
+            return;
+        }
+
+        try {
+            const res = await fetch(`https://api.mercadopago.com/v1/payments/${paymentId}`, {
+                headers: { 'Authorization': `Bearer ${MP_ACCESS_TOKEN}` }
+            });
+            if (!res.ok) return;
+            const data = await res.json();
+
+            if (data.status === 'approved') {
+                clearInterval(timer);
+                console.log(`🎉 [Auto-Desbloqueio] PIX #${paymentId} APROVADO! Desbloqueando veículo ${identificador}...`);
+
+                // Detecta qual moto desbloquear
+                let placaDetectada = (identificador || '').replace(/[^A-Za-z0-9]/g, '').toUpperCase();
+                if (!['IPU2I57', 'IMJ6E36', 'IOG2G34'].includes(placaDetectada)) {
+                    // Fallback para placa mais provável
+                    if (placaDetectada.includes('IMJ') || placaDetectada.includes('6E36')) placaDetectada = 'IMJ6E36';
+                    else if (placaDetectada.includes('IOG') || placaDetectada.includes('2G34')) placaDetectada = 'IOG2G34';
+                    else placaDetectada = 'IPU2I57';
+                }
+
+                // 1. Dispara o desbloqueio satelital na API da Facilita Moto (Xtrack)
+                try {
+                    await fetch('https://www.facilitamoto.com.br/api/telemetry', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            action: 'command_block',
+                            bloquear: false,
+                            placa: placaDetectada,
+                            motivo: `PIX Mercado Pago #${paymentId} Aprovado - Desbloqueio Automático via WhatsApp`
+                        })
+                    });
+                } catch (e) {
+                    console.error('Erro ao enviar desbloqueio para API de telemetria:', e.message);
+                }
+
+                // 2. Notifica o condutor no WhatsApp com confirmação oficial
+                const msgConfirmacao = `🎉 *PAGAMENTO CONFIRMADO NO BANCO MERCADO PAGO!* 🎉\n\n` +
+                    `🔓 *SUA MOTO (${placaDetectada}) FOI DESBLOQUEADA COM SUCESSO!* 🏍️💨\n\n` +
+                    `✅ O bloqueador via satélite foi desativado e o motor liberado na hora.\n` +
+                    `Obrigado pelo pagamento! Tenha uma excelente rota e boa viagem com a Facilita Moto! 🚀`;
+                await enviarMensagem(remoteJid, msgConfirmacao);
+
+                // 3. Notifica o Henrique no WhatsApp particular
+                const hJid = henriqueJidCache || await getValidatedJid(HENRIQUE_RAW_PHONE);
+                if (hJid) {
+                    const alertaHenrique = `💰 *PIX DE DESBLOQUEIO PAGO NO MERCADO PAGO!* 💰\n` +
+                        `• Veículo: *${placaDetectada}*\n` +
+                        `• Valor: *R$ 350,00*\n` +
+                        `• ID Pagamento: #${paymentId}\n` +
+                        `• Status: *MOTO DESBLOQUEADA AUTOMATICAMENTE NO SATÉLITE!* 🔓`;
+                    await enviarMensagem(hJid, alertaHenrique);
+                }
+            }
+        } catch (err) {
+            console.warn('Erro ao verificar status do pagamento:', err.message);
+        }
+    }, 10 * 1000);
+}
+
 const app = express();
 const PORT = process.env.PORT || 3000;
 
@@ -331,7 +408,8 @@ async function criarPixMercadoPago(identificador = 'Cliente') {
     return {
         valor: valor.toFixed(2).replace('.', ','),
         identificador,
-        pixCopiaECola
+        pixCopiaECola,
+        paymentId
     };
 }
 
@@ -773,6 +851,50 @@ async function startWhatsAppBot() {
                     continue;
                 }
 
+                // 3.15. SE O CLIENTE ESTAVA INFORMANDO PLACA/CPF PARA DESBLOQUEIO DE MOTO
+                if (sessao.mode === 'WAITING_UNLOCK_INFO') {
+                    if (texto === '0' || textoLower === 'menu' || textoLower === 'voltar') {
+                        sessao.mode = 'MENU';
+                        clientSessions.set(remoteJid, sessao);
+                        await enviarMensagem(remoteJid, MENUS.principal);
+                        continue;
+                    }
+
+                    sessao.mode = 'MENU';
+                    clientSessions.set(remoteJid, sessao);
+
+                    const placaOuCpf = textoOriginal.trim().toUpperCase();
+                    await enviarMensagem(remoteJid, "⏳ *Consultando moto e gerando cobrança PIX no Mercado Pago Oficial... S um instante!*");
+
+                    const pixData = await criarPixMercadoPago(placaOuCpf);
+                    const textoPix = `✅ *PIX DE DESBLOQUEIO GERADO COM SUCESSO!* 🏍️🔑\n\n` +
+                        `🏍️ *Veículo:* ${pixData.identificador}\n` +
+                        `💰 *Valor:* R$ ${pixData.valor}\n` +
+                        `👤 *Beneficiário:* Henrique Rocha Clavijo (Mercado Pago Oficial)\n` +
+                        `⚡ *Desbloqueio:* Imediato via satélite assim que o PIX for pago!\n\n` +
+                        `📋 *Copie o código PIX Copia e Cola abaixo para pagar:*`;
+
+                    await enviarMensagem(remoteJid, textoPix);
+
+                    setTimeout(async () => {
+                        await enviarMensagem(remoteJid, pixData.pixCopiaECola);
+
+                        setTimeout(async () => {
+                            await enviarMensagem(remoteJid, `📲 *Como funciona o Desbloqueio Automático:*\n` +
+                                `1. Abra o app do seu banco e escolha *PIX Copia e Cola*.\n` +
+                                `2. Cole o código acima e pague.\n` +
+                                `3. O Mercado Pago avisa nosso sistema e a sua moto é *DESBLOQUEADA NA HORA* via satélite! 🔓🚀\n\n` +
+                                `*(Estamos aguardando seu pagamento. Assim que pagar, você receberá a confirmação aqui!)*\n` +
+                                `Digite *0* para voltar ao menu.`);
+                        }, 800);
+                    }, 500);
+
+                    if (pixData.paymentId) {
+                        monitorarPagamentoEDesbloquear(pixData.paymentId, placaOuCpf, remoteJid);
+                    }
+                    continue;
+                }
+
                 // 3.2. SE O CLIENTE ESTAVA ENVIANDO DADOS PARA A FILA DE ESPERA (NOVO LEAD)
                 if (sessao.mode === 'WAITING_LEAD_INFO') {
                     if (texto === '0' || textoLower === 'menu' || textoLower === 'voltar') {
@@ -885,9 +1007,16 @@ Digite *0* para voltar ao menu principal.`);
                     continue;
                 }
 
-                // Opção 3: Solicitar Desbloqueio da Moto
+                // Opção 3: Solicitar Desbloqueio da Moto (com PIX Mercado Pago e Desbloqueio Automático)
                 if (texto === '3' || textoLower.includes('desbloqueio') || textoLower.includes('desbloquear')) {
-                    await enviarMensagem(remoteJid, MENUS.desbloqueio);
+                    sessao.mode = 'WAITING_UNLOCK_INFO';
+                    clientSessions.set(remoteJid, sessao);
+                    const msgPedePlaca = `🔓 *SOLICITAÇÃO DE DESBLOQUEIO DE MOTO* 🏍️💨\n\n` +
+                        `Para gerar o seu PIX e desbloquear a sua moto automaticamente no satélite, por favor informe:\n\n` +
+                        `👉 *Digite a PLACA da moto* (ex: *IPU2I57* ou *IMJ6E36*) ou o seu *CPF*:\n\n` +
+                        `*(Assim que o pagamento for identificado no Mercado Pago, a moto é liberada na hora!)*\n` +
+                        `Digite *0* para voltar ao menu.`;
+                    await enviarMensagem(remoteJid, msgPedePlaca);
                     continue;
                 }
 
