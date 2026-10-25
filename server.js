@@ -742,7 +742,7 @@ const MENUS = {
     principal: `👋 Olá! Seja muito bem-vindo(a) à *Facilita Moto*! 🏍️💨
 Locação de motos com quilometragem livre e suporte completo.
 
-🌐 *Conheça nosso site oficial:* www.agilizamoto.com.br
+🌐 *Conheça nosso site oficial:* https://www.facilitamoto.com.br/
 
 *Digite o NÚMERO da opção desejada:*
 
