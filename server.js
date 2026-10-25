@@ -26,6 +26,21 @@ function recordLog(level, args) {
             text
         });
         if (recentLogs.length > 150) recentLogs.pop();
+
+        // AUTO-CURA DE BAD MAC: Remove arquivos de sessão corrompidos para forçar renegotiation limpa
+        if (text.includes('Bad MAC') || text.includes('Failed to decrypt message')) {
+            try {
+                if (fs.existsSync(AUTH_FOLDER)) {
+                    const files = fs.readdirSync(AUTH_FOLDER);
+                    for (const f of files) {
+                        if (f.startsWith('session-')) {
+                            fs.unlinkSync(path.join(AUTH_FOLDER, f));
+                            origLog('🩹 [Auto-Cure Bad MAC] Removido arquivo de sessão corrompido:', f);
+                        }
+                    }
+                }
+            } catch(e) {}
+        }
     } catch (e) {}
 }
 
@@ -315,22 +330,27 @@ async function salvarSessaoNoFirestore() {
         for (const file of files) {
             if (file.startsWith('session-')) continue; // Nunca salva sessões individuais para evitar Bad MAC de descriptografia
             const filePath = path.join(AUTH_FOLDER, file);
-            if (!fs.statSync(filePath).isFile()) continue;
-            const content = fs.readFileSync(filePath);
-            const b64 = content.toString('base64');
-            const docId = file.replace(/[^a-zA-Z0-9_-]/g, '_');
+            if (!fs.existsSync(filePath)) continue;
+            try {
+                if (!fs.statSync(filePath).isFile()) continue;
+                const content = fs.readFileSync(filePath);
+                const b64 = content.toString('base64');
+                const docId = file.replace(/[^a-zA-Z0-9_-]/g, '_');
 
-            await fetch(`${FIRESTORE_AUTH_URL}/${docId}?key=${FIRESTORE_API_KEY}`, {
-                method: 'PATCH',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    fields: {
-                        filename: { stringValue: file },
-                        data: { stringValue: b64 },
-                        updatedAt: { stringValue: new Date().toISOString() }
-                    }
-                })
-            });
+                await fetch(`${FIRESTORE_AUTH_URL}/${docId}?key=${FIRESTORE_API_KEY}`, {
+                    method: 'PATCH',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        fields: {
+                            filename: { stringValue: file },
+                            data: { stringValue: b64 },
+                            updatedAt: { stringValue: new Date().toISOString() }
+                        }
+                    })
+                });
+            } catch (errFile) {
+                continue;
+            }
         }
         console.log('✅ [Cloud Session] Sessão persistida no Firestore com sucesso!');
     } catch (e) {
@@ -659,22 +679,13 @@ async function atualizarIdentidadesHenrique() {
 
 
 // =====================================================================
-// DISPARADOR ROBUSTO DE NOTIFICAÇÃO PARA O HENRIQUE (TODOS OS JIDS/LIDS)
+// DISPARADOR ROBUSTO DE NOTIFICAÇÃO PARA O HENRIQUE (SEMPRE @s.whatsapp.net)
 // =====================================================================
 async function notificarHenrique(mensagem) {
-    const targets = new Set([
-        '5551986551068@s.whatsapp.net',
-        '555186551068@s.whatsapp.net',
-        '144543030767616@lid'
-    ]);
-    if (henriqueJidCache) targets.add(henriqueJidCache);
-    for (const jid of henriqueKnownJids) {
-        if (jid) targets.add(jid);
-    }
-
+    if (!sock || !isConnected) return false;
+    const targets = ['5551986551068@s.whatsapp.net', '555186551068@s.whatsapp.net'];
     let entregueAlgum = false;
     for (const jid of targets) {
-        if (!jid) continue;
         try {
             const ok = await sock.sendMessage(jid, { text: mensagem });
             if (ok) {
@@ -689,12 +700,39 @@ async function notificarHenrique(mensagem) {
 }
 
 async function enviarMensagem(targetJid, texto) {
-    if (!sock || !isConnected) return false;
+    if (!sock || !isConnected) {
+        console.warn(`[enviarMensagem] WhatsApp desconectado ou sock nulo ao enviar para ${targetJid}`);
+        return false;
+    }
+
+    // Normaliza targetJid garantindo envio para @s.whatsapp.net (NUNCA envia cru para @lid)
+    let jidPrincipal = targetJid;
+    const fallbacks = [];
+
+    if (typeof targetJid === 'string') {
+        if (targetJid.includes('144543030767616') || targetJid.includes('228518650753030') || targetJid.includes('51986551068') || targetJid.includes('5186551068') || henriqueKnownJids.has(targetJid)) {
+            jidPrincipal = '5551986551068@s.whatsapp.net';
+            fallbacks.push('555186551068@s.whatsapp.net');
+        } else if (targetJid.includes('107941151653891') || targetJid.includes('51984843741') || targetJid.includes('5184843741')) {
+            jidPrincipal = '5551984843741@s.whatsapp.net';
+            fallbacks.push('555184843741@s.whatsapp.net');
+        }
+    }
+
     try {
-        await sock.sendMessage(targetJid, { text: texto });
+        await sock.sendMessage(jidPrincipal, { text: texto });
+        console.log(`📤 [Msg Enviada com Sucesso]: para ${jidPrincipal}`);
         return true;
     } catch (err) {
-        console.error(`Erro ao enviar mensagem para ${targetJid}:`, err);
+        console.error(`Erro ao enviar mensagem para ${jidPrincipal}:`, err?.message || err);
+        // Tenta fallbacks se houver
+        for (const fb of fallbacks) {
+            try {
+                await sock.sendMessage(fb, { text: texto });
+                console.log(`📤 [Msg Enviada Fallback]: para ${fb}`);
+                return true;
+            } catch (e2) {}
+        }
         return false;
     }
 }
@@ -704,7 +742,7 @@ const MENUS = {
     principal: `👋 Olá! Seja muito bem-vindo(a) à *Facilita Moto*! 🏍️💨
 Locação de motos com quilometragem livre e suporte completo.
 
-🌐 *Conheça nosso site oficial:* https://www.facilitamoto.com.br/
+🌐 *Conheça nosso site oficial:* www.agilizamoto.com.br
 
 *Digite o NÚMERO da opção desejada:*
 
@@ -797,7 +835,13 @@ async function startWhatsAppBot() {
             printQRInTerminal: true,
             auth: state,
             browser: ['Facilita Moto Bot', 'Chrome', '1.0.0'],
-            defaultQueryTimeoutMs: 60000
+            defaultQueryTimeoutMs: 60000,
+            syncFullHistory: false,
+            getMessage: async (key) => {
+                return {
+                    conversation: 'menu'
+                };
+            }
         });
 
         sock.ev.on('creds.update', async () => {
@@ -912,8 +956,15 @@ sock.ev.on('messages.upsert', async ({ messages, type }) => {
             for (const msg of messages) {
                 if (!msg.message) continue;
 
-                const remoteJid = msg.key.remoteJid;
+                let remoteJid = msg.key.remoteJid;
                 if (!remoteJid || remoteJid.endsWith('@g.us') || remoteJid === 'status@broadcast') continue;
+
+                // NORMALIZAÇÃO DE LIDS: Converte LIDs conhecidos para seus JIDs reais (@s.whatsapp.net)
+                if (remoteJid.includes('144543030767616') || remoteJid.includes('228518650753030') || remoteJid.includes('51986551068') || remoteJid.includes('5186551068')) {
+                    remoteJid = '5551986551068@s.whatsapp.net';
+                } else if (remoteJid.includes('107941151653891') || remoteJid.includes('51984843741') || remoteJid.includes('5184843741')) {
+                    remoteJid = '5551984843741@s.whatsapp.net';
+                }
 
                 const textoOriginal = extrairTextoMensagem(msg);
 
@@ -921,11 +972,6 @@ sock.ev.on('messages.upsert', async ({ messages, type }) => {
                 const textoLower = texto.toLowerCase();
                 let senderNumber = remoteJid.replace('@s.whatsapp.net', '').replace('@lid', '');
                 const pushName = msg.pushName || 'Cliente';
-
-                // Mapeamento exclusivo de LIDs de clientes conhecidos
-                if (remoteJid.includes('107941151653891') || senderNumber === '107941151653891') {
-                    senderNumber = '5551984843741';
-                }
 
                 // =============================================================
                 // 1. MENSAGEM ENVIADA PELO PRÓPRIO NÚMERO DA FACILITA MOTO
@@ -939,20 +985,22 @@ sock.ev.on('messages.upsert', async ({ messages, type }) => {
                 const ehClienteAtivo = activeSupport && (
                     activeSupport.clientJid === remoteJid ||
                     (activeSupport.clientPhone && remoteJid.includes(activeSupport.clientPhone)) ||
-                    remoteJid.includes('107941151653891')
+                    remoteJid.includes('51984843741')
                 );
 
                 const isHenrique = !ehClienteAtivo && (
+                    remoteJid === '5551986551068@s.whatsapp.net' ||
                     remoteJid === henriqueJidCache ||
                     henriqueKnownJids.has(remoteJid) ||
                     remoteJid.includes('51986551068') ||
                     remoteJid.includes('5186551068') ||
-                    remoteJid.includes('144543030767616')
+                    remoteJid.includes('144543030767616') ||
+                    remoteJid.includes('228518650753030')
                 );
 
                 if (isHenrique) {
                     henriqueKnownJids.add(remoteJid);
-                    henriqueJidCache = remoteJid;
+                    henriqueJidCache = '5551986551068@s.whatsapp.net';
                     console.log(`💬 [Mensagem do Henrique capturada]: "${texto}" de ${remoteJid} | Suporte Ativo:`, activeSupport);
 
                     // 2.1. Comandos de Controle do Administrador
@@ -1578,6 +1626,35 @@ app.all('/api/clear-sessions', (req, res) => {
     clientSessions.clear();
     activeSupport = null;
     res.json({ ok: true, cleared: total, message: 'Todas as sessões de clientes foram resetadas para o MENU com sucesso!' });
+});
+
+// Endpoint de Correção de Bad MAC (Limpa sessões corrompidas e reconecta)
+app.all('/api/fix-bad-mac', (req, res) => {
+    try {
+        let deleted = 0;
+        if (fs.existsSync(AUTH_FOLDER)) {
+            const files = fs.readdirSync(AUTH_FOLDER);
+            for (const f of files) {
+                if (f.startsWith('session-') || f.includes('228518650753030') || f.includes('144543030767616')) {
+                    fs.unlinkSync(path.join(AUTH_FOLDER, f));
+                    deleted++;
+                }
+            }
+        }
+        clientSessions.clear();
+        activeSupport = null;
+        res.json({ ok: true, deletedSessionFiles: deleted, message: 'Arquivos de sessão com Bad MAC removidos com sucesso!' });
+    } catch (e) {
+        res.status(500).json({ ok: false, error: e.message });
+    }
+});
+
+// Endpoint para testar disparo do Menu
+app.all('/api/test-send', async (req, res) => {
+    const num = req.query.phone || '5551986551068';
+    const jid = `${num.replace(/\D/g, '')}@s.whatsapp.net`;
+    const ok = await enviarMensagem(jid, MENUS.principal);
+    res.json({ ok, target: jid, timestamp: new Date().toISOString() });
 });
 
 app.get('/api/logs', (req, res) => {
