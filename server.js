@@ -26,21 +26,6 @@ function recordLog(level, args) {
             text
         });
         if (recentLogs.length > 150) recentLogs.pop();
-
-        // AUTO-CURA DE BAD MAC: Remove arquivos de sessão corrompidos para forçar renegotiation limpa
-        if (text.includes('Bad MAC') || text.includes('Failed to decrypt message')) {
-            try {
-                if (fs.existsSync(AUTH_FOLDER)) {
-                    const files = fs.readdirSync(AUTH_FOLDER);
-                    for (const f of files) {
-                        if (f.startsWith('session-')) {
-                            fs.unlinkSync(path.join(AUTH_FOLDER, f));
-                            origLog('🩹 [Auto-Cure Bad MAC] Removido arquivo de sessão corrompido:', f);
-                        }
-                    }
-                }
-            } catch(e) {}
-        }
     } catch (e) {}
 }
 
@@ -204,15 +189,6 @@ let leadsFilaDeEspera = []; // Leads que entraram na fila de espera
 const AUTH_FOLDER = path.join(__dirname, 'auth_session');
 if (!fs.existsSync(AUTH_FOLDER)) {
     fs.mkdirSync(AUTH_FOLDER, { recursive: true });
-} else {
-    try {
-        const existingAuthFiles = fs.readdirSync(AUTH_FOLDER);
-        for (const f of existingAuthFiles) {
-            if (f.startsWith('session-')) {
-                fs.unlinkSync(path.join(AUTH_FOLDER, f));
-            }
-        }
-    } catch(e) {}
 }
 
 // =====================================================================
@@ -713,7 +689,7 @@ async function enviarMensagem(targetJid, texto) {
         if (targetJid.includes('144543030767616') || targetJid.includes('228518650753030') || targetJid.includes('51986551068') || targetJid.includes('5186551068') || henriqueKnownJids.has(targetJid)) {
             jidPrincipal = '5551986551068@s.whatsapp.net';
             fallbacks.push('555186551068@s.whatsapp.net');
-        } else if (targetJid.includes('107941151653891') || targetJid.includes('51984843741') || targetJid.includes('5184843741')) {
+        } else if (targetJid.includes('107941151653891') || targetJid.includes('133797408420095') || targetJid.includes('51984843741') || targetJid.includes('5184843741')) {
             jidPrincipal = '5551984843741@s.whatsapp.net';
             fallbacks.push('555184843741@s.whatsapp.net');
         }
@@ -735,6 +711,20 @@ async function enviarMensagem(targetJid, texto) {
         }
         return false;
     }
+}
+
+// ANTI-SPAM GUARD: Evita disparo repetido de menu para o mesmo contato em menos de 8 segundos
+const lastMenuSentAt = new Map();
+async function enviarMenuComAntiSpam(targetJid, textoMenu) {
+    const agora = Date.now();
+    const jidLimpo = (typeof targetJid === 'string') ? targetJid.split('@')[0] : targetJid;
+    const ultimo = lastMenuSentAt.get(jidLimpo) || 0;
+    if (agora - ultimo < 8000) {
+        console.log(`⏳ [Anti-Spam]: Ignorando envio repetido de menu para ${targetJid} (enviado há ${(agora - ultimo)/1000}s)`);
+        return true;
+    }
+    lastMenuSentAt.set(jidLimpo, agora);
+    return await enviarMensagem(targetJid, textoMenu);
 }
 
 // Menus Sequenciais 1 a 6 com Requisitos e Valores Atualizados
@@ -913,13 +903,15 @@ async function startWhatsAppBot() {
                         }
                         if (callerJid.includes('144543030767616') || callerJid.includes('228518650753030') || callerJid.includes('51986551068') || callerJid.includes('5186551068')) {
                             callerJid = '5551986551068@s.whatsapp.net';
+                        } else if (callerJid.includes('107941151653891') || callerJid.includes('133797408420095') || callerJid.includes('51984843741') || callerJid.includes('5184843741')) {
+                            callerJid = '5551984843741@s.whatsapp.net';
                         }
                         const sessao = clientSessions.get(callerJid) || { mode: 'MENU', lastActive: Date.now() };
                         sessao.mode = 'MENU';
                         sessao.lastActive = Date.now();
                         clientSessions.set(callerJid, sessao);
 
-                        await enviarMensagem(callerJid, "Olá! 👋 Nosso atendimento por este número é 100% digital e automatizado por mensagens.\n\nComo posso te ajudar agora? Escolha uma opção:\n\n" + MENUS.principal);
+                        await enviarMenuComAntiSpam(callerJid, "Olá! 👋 Nosso atendimento por este número é 100% digital e automatizado por mensagens.\n\nComo posso te ajudar agora? Escolha uma opção:\n\n" + MENUS.principal);
                     } catch (e) {
                         console.error('Erro ao responder chamada de voz:', e);
                     }
@@ -965,6 +957,12 @@ sock.ev.on('messages.upsert', async ({ messages, type }) => {
                 let remoteJid = msg.key?.remoteJid;
                 if (!remoteJid || remoteJid.endsWith('@g.us') || remoteJid === 'status@broadcast') continue;
 
+                // Extrai o telefone real direto do senderPn caso a mensagem venha sob LID
+                if (msg.key?.senderPn) {
+                    const pn = msg.key.senderPn.replace(/\D/g, '');
+                    if (pn) remoteJid = `${pn}@s.whatsapp.net`;
+                }
+
                 // Remove sufixo de dispositivo multi-device (ex: 5551986551068:1@s.whatsapp.net -> 5551986551068@s.whatsapp.net)
                 if (remoteJid.includes(':')) {
                     remoteJid = remoteJid.split(':')[0] + (remoteJid.includes('@lid') ? '@lid' : '@s.whatsapp.net');
@@ -973,25 +971,13 @@ sock.ev.on('messages.upsert', async ({ messages, type }) => {
                 // NORMALIZAÇÃO DE LIDS: Converte LIDs conhecidos para seus JIDs reais (@s.whatsapp.net)
                 if (remoteJid.includes('144543030767616') || remoteJid.includes('228518650753030') || remoteJid.includes('51986551068') || remoteJid.includes('5186551068')) {
                     remoteJid = '5551986551068@s.whatsapp.net';
-                } else if (remoteJid.includes('107941151653891') || remoteJid.includes('51984843741') || remoteJid.includes('5184843741')) {
+                } else if (remoteJid.includes('107941151653891') || remoteJid.includes('133797408420095') || remoteJid.includes('51984843741') || remoteJid.includes('5184843741')) {
                     remoteJid = '5551984843741@s.whatsapp.net';
                 }
 
-                // SE A MENSAGEM CHEGOU MAS O MOTOR NÃO CONSEGUIU DESCRIPTOGRAFAR (ERRO DE MAC / HANDSHAKE):
-                // NUNCA DEIXA O CLIENTE NO VÁCUO! Responde com o Menu Principal e limpa a sessão para renovação
+                // Recibos de leitura, confirmações de entrega, status e acks não possuem msg.message:
+                // Ignora silenciosamente sem disparar menus repetidos e sem deletar sessões
                 if (!msg.message) {
-                    console.warn(`⚠️ [Decryption Fallback]: Mensagem recebida de ${remoteJid} sem payload legível. Limpando sessão corrompida e enviando Menu Principal!`);
-                    try {
-                        if (fs.existsSync(AUTH_FOLDER)) {
-                            const files = fs.readdirSync(AUTH_FOLDER);
-                            for (const f of files) {
-                                if (f.startsWith('session-')) {
-                                    fs.unlinkSync(path.join(AUTH_FOLDER, f));
-                                }
-                            }
-                        }
-                    } catch (e) {}
-                    await enviarMensagem(remoteJid, MENUS.principal);
                     continue;
                 }
 
@@ -1013,8 +999,7 @@ sock.ev.on('messages.upsert', async ({ messages, type }) => {
                 // =============================================================
                 const ehClienteAtivo = activeSupport && (
                     activeSupport.clientJid === remoteJid ||
-                    (activeSupport.clientPhone && remoteJid.includes(activeSupport.clientPhone)) ||
-                    remoteJid.includes('51984843741')
+                    (activeSupport.clientPhone && remoteJid.includes(activeSupport.clientPhone))
                 );
 
                 const isHenrique = !ehClienteAtivo && (
@@ -1422,7 +1407,7 @@ Digite *0* para voltar ao menu principal.`);
                         await enviarMensagem(remoteJid, msgLojistaConectado);
 
                         // Se digitou algo além de '1', repassa a mensagem já dita para o Henrique
-                        const mensagemAdicional = (texto === '1' || digitosTexto === '1') ? 'Lojista solicitou atendimento imediato após enviar proposta.' : textoOriginal;
+                        const mensagemAdicional = (texto === '1' || digitosEntrada === '1') ? 'Lojista solicitou atendimento imediato após enviar proposta.' : textoOriginal;
 
                         const alertaAtendimentoLojista = `🏪🚨 *ATENDIMENTO DE LOJISTA ACIONADO!* 🚨\n👤 *Lojista:* ${pushName}\n📱 *WhatsApp:* ${phoneWaMe}\n🏢 *Loja:* ${sessao.lojista?.gerenteELoja || 'Loja Parceira'}\n⏰ *Horário:* ${horaSP}\n💬 *Mensagem:* "${mensagemAdicional}"\n\n🟢 *A PONTE ESTÁ ATIVADA!* Basta responder esta mensagem aqui no seu WhatsApp para falar direto com o lojista pelo WhatsApp da Facilita!\n\n👉 Ou abra direto: https://wa.me/${phoneWaMe}\n*(Para encerrar depois, basta digitar #sair).*`;
                         await notificarHenrique(alertaAtendimentoLojista);
@@ -1609,7 +1594,7 @@ Qualquer mensagem que você digitar agora será entregue ao cliente pelo WhatsAp
                 if (texto === '0' || textoLower === 'menu' || textoLower === 'voltar' || textoLower === 'inicio') {
                     sessao.mode = 'MENU';
                     clientSessions.set(remoteJid, sessao);
-                    await enviarMensagem(remoteJid, MENUS.principal);
+                    await enviarMenuComAntiSpam(remoteJid, MENUS.principal);
                     continue;
                 }
 
@@ -1633,8 +1618,8 @@ Qualquer mensagem que você digitar agora será entregue ao cliente pelo WhatsAp
                     continue;
                 }
 
-                // Padrão: Apresenta o Menu Principal
-                await enviarMensagem(remoteJid, MENUS.principal);
+                // Padrão: Apresenta o Menu Principal (com proteção anti-spam para evitar múltiplos disparos no mesmo contato)
+                await enviarMenuComAntiSpam(remoteJid, MENUS.principal);
             }
         });
 
