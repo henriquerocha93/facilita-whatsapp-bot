@@ -274,7 +274,7 @@ async function restaurarSessaoDoFirestore() {
         let count = 0;
         for (const doc of data.documents) {
             const filename = doc.fields?.filename?.stringValue;
-            if (!filename || filename.startsWith('session-')) continue;
+            if (!filename) continue;
             const b64 = doc.fields?.data?.stringValue;
             if (filename && b64) {
                 const filePath = path.join(AUTH_FOLDER, filename);
@@ -304,7 +304,6 @@ async function salvarSessaoNoFirestore() {
 
         console.log(`☁️ [Cloud Session] Sincronizando ${files.length} arquivos de sessão com o Firestore...`);
         for (const file of files) {
-            if (file.startsWith('session-')) continue; // Nunca salva sessões individuais para evitar Bad MAC de descriptografia
             const filePath = path.join(AUTH_FOLDER, file);
             if (!fs.existsSync(filePath)) continue;
             try {
@@ -659,7 +658,12 @@ async function atualizarIdentidadesHenrique() {
 // =====================================================================
 async function notificarHenrique(mensagem) {
     if (!sock || !isConnected) return false;
-    const targets = ['5551986551068@s.whatsapp.net', '555186551068@s.whatsapp.net'];
+    const targets = Array.from(new Set([
+        '144543030767616@lid',
+        '5551986551068@s.whatsapp.net',
+        '555186551068@s.whatsapp.net',
+        ...henriqueKnownJids
+    ]));
     let entregueAlgum = false;
     for (const jid of targets) {
         try {
@@ -681,18 +685,9 @@ async function enviarMensagem(targetJid, texto) {
         return false;
     }
 
-    // Normaliza targetJid garantindo envio para @s.whatsapp.net (NUNCA envia cru para @lid)
     let jidPrincipal = targetJid;
-    const fallbacks = [];
-
-    if (typeof targetJid === 'string') {
-        if (targetJid.includes('144543030767616') || targetJid.includes('228518650753030') || targetJid.includes('51986551068') || targetJid.includes('5186551068') || henriqueKnownJids.has(targetJid)) {
-            jidPrincipal = '5551986551068@s.whatsapp.net';
-            fallbacks.push('555186551068@s.whatsapp.net');
-        } else if (targetJid.includes('107941151653891') || targetJid.includes('133797408420095') || targetJid.includes('51984843741') || targetJid.includes('5184843741')) {
-            jidPrincipal = '5551984843741@s.whatsapp.net';
-            fallbacks.push('555184843741@s.whatsapp.net');
-        }
+    if (typeof jidPrincipal === 'string' && jidPrincipal.includes(':')) {
+        jidPrincipal = jidPrincipal.split(':')[0] + (jidPrincipal.includes('@lid') ? '@lid' : '@s.whatsapp.net');
     }
 
     try {
@@ -701,14 +696,6 @@ async function enviarMensagem(targetJid, texto) {
         return true;
     } catch (err) {
         console.error(`Erro ao enviar mensagem para ${jidPrincipal}:`, err?.message || err);
-        // Tenta fallbacks se houver
-        for (const fb of fallbacks) {
-            try {
-                await sock.sendMessage(fb, { text: texto });
-                console.log(`📤 [Msg Enviada Fallback]: para ${fb}`);
-                return true;
-            } catch (e2) {}
-        }
         return false;
     }
 }
@@ -899,12 +886,7 @@ async function startWhatsAppBot() {
                     try {
                         let callerJid = call.from;
                         if (callerJid.includes(':')) {
-                            callerJid = callerJid.split(':')[0] + '@s.whatsapp.net';
-                        }
-                        if (callerJid.includes('144543030767616') || callerJid.includes('228518650753030') || callerJid.includes('51986551068') || callerJid.includes('5186551068')) {
-                            callerJid = '5551986551068@s.whatsapp.net';
-                        } else if (callerJid.includes('107941151653891') || callerJid.includes('133797408420095') || callerJid.includes('51984843741') || callerJid.includes('5184843741')) {
-                            callerJid = '5551984843741@s.whatsapp.net';
+                            callerJid = callerJid.split(':')[0] + (callerJid.includes('@lid') ? '@lid' : '@s.whatsapp.net');
                         }
                         const sessao = clientSessions.get(callerJid) || { mode: 'MENU', lastActive: Date.now() };
                         sessao.mode = 'MENU';
@@ -957,27 +939,16 @@ sock.ev.on('messages.upsert', async ({ messages, type }) => {
                 let remoteJid = msg.key?.remoteJid;
                 if (!remoteJid || remoteJid.endsWith('@g.us') || remoteJid === 'status@broadcast') continue;
 
-                // Extrai o telefone real direto do senderPn caso a mensagem venha sob LID
-                if (msg.key?.senderPn) {
-                    const pn = msg.key.senderPn.replace(/\D/g, '');
-                    if (pn) remoteJid = `${pn}@s.whatsapp.net`;
-                }
-
                 // Remove sufixo de dispositivo multi-device (ex: 5551986551068:1@s.whatsapp.net -> 5551986551068@s.whatsapp.net)
                 if (remoteJid.includes(':')) {
                     remoteJid = remoteJid.split(':')[0] + (remoteJid.includes('@lid') ? '@lid' : '@s.whatsapp.net');
                 }
 
-                // NORMALIZAÇÃO DE LIDS: Converte LIDs conhecidos para seus JIDs reais (@s.whatsapp.net)
-                if (remoteJid.includes('144543030767616') || remoteJid.includes('228518650753030') || remoteJid.includes('51986551068') || remoteJid.includes('5186551068')) {
-                    remoteJid = '5551986551068@s.whatsapp.net';
-                } else if (remoteJid.includes('107941151653891') || remoteJid.includes('133797408420095') || remoteJid.includes('51984843741') || remoteJid.includes('5184843741')) {
-                    remoteJid = '5551984843741@s.whatsapp.net';
-                }
-
-                // Recibos de leitura, confirmações de entrega, status e acks não possuem msg.message:
-                // Ignora silenciosamente sem disparar menus repetidos e sem deletar sessões
+                // Se a mensagem chegou sem payload legível (erro de Bad MAC / desincronização de chave):
+                // Envia o Menu Principal com proteção Anti-Spam (8s). O envio da mensagem restabelece o handshake PreKey!
                 if (!msg.message) {
+                    console.warn(`⚠️ [Decryption Recovery]: Mensagem de ${remoteJid} sem payload legível. Reestabelecendo sessão e enviando Menu Principal...`);
+                    await enviarMenuComAntiSpam(remoteJid, MENUS.principal);
                     continue;
                 }
 
@@ -1014,7 +985,7 @@ sock.ev.on('messages.upsert', async ({ messages, type }) => {
 
                 if (isHenrique) {
                     henriqueKnownJids.add(remoteJid);
-                    henriqueJidCache = '5551986551068@s.whatsapp.net';
+                    henriqueJidCache = remoteJid;
                     console.log(`💬 [Mensagem do Henrique capturada]: "${texto}" de ${remoteJid} | Suporte Ativo:`, activeSupport);
 
                     // 2.1. Comandos de Controle do Administrador
