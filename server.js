@@ -256,6 +256,109 @@ const FIRESTORE_AUTH_URL = `https://firestore.googleapis.com/v1/projects/${FIRES
 
 const FIRESTORE_EMERGENCIAS_URL = "https://firestore.googleapis.com/v1/projects/" + FIRESTORE_PROJECT_ID + "/databases/(default)/documents/alertas_emergencia";
 const FIRESTORE_LOJISTAS_URL = "https://firestore.googleapis.com/v1/projects/" + FIRESTORE_PROJECT_ID + "/databases/(default)/documents/propostas_lojistas";
+const FIRESTORE_CLIENTES_URL = "https://firestore.googleapis.com/v1/projects/" + FIRESTORE_PROJECT_ID + "/databases/(default)/documents/crm_clientes";
+
+// =====================================================================
+// SALVA LEADS DE LOCAÇÃO DO WHATSAPP DIRETO EM CRM_CLIENTES (IGUAL AO SITE)
+// =====================================================================
+async function salvarLeadNoFirestore(leadData) {
+    try {
+        const id = leadData.id || Math.random().toString(36).substring(2, 11);
+        const agoraSP = getSaoPauloDate();
+        const hojeIso = agoraSP.toISOString().split('T')[0];
+        const horaSP = agoraSP.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+
+        const nome = String(leadData.nome || 'Lead WhatsApp').trim();
+        const telefone = String(leadData.telefone || '').replace(/\D/g, '');
+        const cpf = String(leadData.cpf || '').replace(/\D/g, '');
+        const endereco = String(leadData.endereco || leadData.bairro || '').trim();
+        const dados = String(leadData.dados || '').trim();
+
+        // 1. Consulta se este cliente/lead já existe no crm_clientes para não duplicar
+        let docExistente = null;
+        let docId = id;
+        try {
+            const resClientes = await fetch(`${FIRESTORE_CLIENTES_URL}?key=${FIRESTORE_API_KEY}`).then(r => r.json());
+            const clientesDocs = resClientes.documents || [];
+            
+            for (const doc of clientesDocs) {
+                const f = doc.fields || {};
+                const telDoc = (f.telefone?.stringValue || '').replace(/\D/g, '');
+                const cpfDoc = (f.cpf?.stringValue || '').replace(/\D/g, '');
+                if ((telefone && telDoc && (telDoc.includes(telefone) || telefone.includes(telDoc))) ||
+                    (cpf && cpfDoc && cpfDoc === cpf)) {
+                    docExistente = doc;
+                    docId = doc.name.split('/').pop();
+                    break;
+                }
+            }
+        } catch (eConsulta) {
+            console.warn('[Firestore] Aviso ao consultar leads existentes:', eConsulta.message);
+        }
+
+        const notaNova = {
+            mapValue: {
+                fields: {
+                    text: { stringValue: `📱 [WhatsApp FACILITA MOTO] ${agoraSP.toLocaleDateString('pt-BR')} ${horaSP} - Lead cadastrado na Fila de Espera:\n${dados || 'Enviou dados via WhatsApp'}` },
+                    date: { stringValue: hojeIso }
+                }
+            }
+        };
+
+        let notasArray = [notaNova];
+        let statusFinal = 'novo';
+        let nomeFinal = nome;
+        let cpfFinal = cpf;
+        let enderecoFinal = endereco;
+
+        if (docExistente) {
+            const f = docExistente.fields || {};
+            statusFinal = f.status?.stringValue || 'novo';
+            if (f.nome?.stringValue && f.nome.stringValue !== 'Lead WhatsApp' && f.nome.stringValue !== 'Cliente') {
+                nomeFinal = f.nome.stringValue;
+            }
+            if (f.cpf?.stringValue) cpfFinal = f.cpf.stringValue;
+            if (f.endereco?.stringValue) enderecoFinal = f.endereco.stringValue;
+            const notasAntigas = f.notas?.arrayValue?.values || [];
+            notasArray = [notaNova, ...notasAntigas];
+        }
+
+        const payload = {
+            fields: {
+                id: { stringValue: docId },
+                nome: { stringValue: nomeFinal },
+                telefone: { stringValue: telefone },
+                email: { stringValue: leadData.email || '' },
+                cpf: { stringValue: cpfFinal },
+                rg: { stringValue: '' },
+                cnh: { stringValue: leadData.cnh || '' },
+                cnhCat: { stringValue: 'A' },
+                cnhValidade: { stringValue: '' },
+                endereco: { stringValue: enderecoFinal },
+                fotoCnh: { stringValue: '' },
+                status: { stringValue: statusFinal },
+                origem: { stringValue: 'WhatsApp (Fila de Espera)' },
+                notas: {
+                    arrayValue: {
+                        values: notasArray
+                    }
+                }
+            }
+        };
+
+        const res = await fetch(`${FIRESTORE_CLIENTES_URL}/${docId}?key=${FIRESTORE_API_KEY}`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        });
+
+        console.log(`📋 [Firestore Lead]: Lead ${nomeFinal} (${telefone}) salvo em crm_clientes [${docId}] (status ${res.status})`);
+        return { ok: true, id: docId, nome: nomeFinal };
+    } catch (e) {
+        console.warn('Erro ao salvar lead no Firestore:', e.message);
+        return { ok: false, error: e.message };
+    }
+}
 
 async function salvarEmergenciaNoFirestore(alertObj) {
     try {
@@ -1364,10 +1467,49 @@ sock.ev.on('messages.upsert', async ({ messages, type }) => {
                     const horaSP = getSaoPauloDate().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
                     const phoneWaMe = formatarParaWaMe(senderNumber);
 
-                    const novoLead = {
-                        id: `LEAD-${Date.now()}`,
-                        nome: pushName,
+                    // Extração inteligente de dados fornecidos pelo usuário
+                    const textoBruto = textoOriginal || '';
+                    const cpfMatch = textoBruto.match(/\b\d{3}\.?\d{3}\.?\d{3}\-?\d{2}\b/) || textoBruto.match(/\b\d{11}\b/);
+                    const cpfExtraido = cpfMatch ? cpfMatch[0].replace(/\D/g, '') : '';
+
+                    let nomeExtraido = pushName || 'Lead WhatsApp';
+                    if (textoBruto) {
+                        const linhas = textoBruto.split('\n').map(l => l.trim()).filter(Boolean);
+                        const linhaNome = linhas.find(l => /^nome\s*[:=]\s*/i.test(l));
+                        if (linhaNome) {
+                            nomeExtraido = linhaNome.replace(/^nome\s*[:=]\s*/i, '').trim();
+                        } else if (linhas.length > 0 && linhas[0].length >= 3 && !/^\d+$/.test(linhas[0]) && !linhas[0].includes('http')) {
+                            const partes = linhas[0].split(' ');
+                            if (partes.length >= 2 && partes.length <= 6 && !linhas[0].includes('@') && !linhas[0].includes('/')) {
+                                nomeExtraido = linhas[0];
+                            }
+                        }
+                    }
+                    if ((!nomeExtraido || nomeExtraido === 'Lead WhatsApp') && pushName && pushName !== 'Cliente') {
+                        nomeExtraido = pushName;
+                    }
+
+                    let enderecoExtraido = '';
+                    const matchBairro = textoBruto.match(/(?:bairro|rua|av|avenida|moro no|moro na|resido em|endereço|endereco)\s*[:=]?\s*([^\n,]+)/i);
+                    if (matchBairro && matchBairro[0]) {
+                        enderecoExtraido = matchBairro[0].trim();
+                    }
+
+                    // Salva no Firestore crm_clientes (onde ficam todos os leads do Facilita Moto, junto com os do site)
+                    const resLeadSalvo = await salvarLeadNoFirestore({
+                        nome: nomeExtraido,
                         telefone: phoneWaMe,
+                        cpf: cpfExtraido,
+                        endereco: enderecoExtraido,
+                        dados: textoOriginal || '[Foto ou documento CNH enviado]'
+                    });
+
+                    const novoLead = {
+                        id: resLeadSalvo?.id || `LEAD-${Date.now()}`,
+                        nome: nomeExtraido,
+                        telefone: phoneWaMe,
+                        cpf: cpfExtraido,
+                        endereco: enderecoExtraido,
                         dados: textoOriginal || 'Enviou documento/foto',
                         hora: horaSP,
                         timestamp: Date.now()
@@ -1375,30 +1517,27 @@ sock.ev.on('messages.upsert', async ({ messages, type }) => {
                     leadsFilaDeEspera.unshift(novoLead);
                     if (leadsFilaDeEspera.length > 50) leadsFilaDeEspera.pop();
 
-                    const respCliente = `✅ *CADASTRO REALIZADO NA FILA DE ESPERA!* 🏍️📋
-
-Muito obrigado, *${pushName}*! Seus dados foram cadastrados com sucesso em nossa Fila de Espera prioritária.
-
-Assim que uma moto for liberada para locação, entraremos em contato direto com você por aqui!
-
-*(Lembrando que os requisitos para retirada são: R$ 700,00 de entrada [caução + 1ª semana], CNH A, comprovante de residência e 1 testemunha no contrato).*
-
-Digite *0* para voltar ao menu principal.`;
+                    const respCliente = `✅ *CADASTRO REALIZADO COM SUCESSO!* 🏍️📋\n\n` +
+                        `Muito obrigado, *${nomeExtraido}*! Seus dados foram cadastrados com sucesso em nossa *Fila de Espera prioritária* no sistema da Facilita Moto.\n\n` +
+                        `📱 *Telefone registrado:* ${phoneWaMe}\n` +
+                        `${cpfExtraido ? `🪪 *CPF:* ${cpfExtraido}\n` : ''}` +
+                        `${enderecoExtraido ? `📍 *Bairro/Endereço:* ${enderecoExtraido}\n` : ''}\n` +
+                        `Assim que uma moto for liberada para locação, entraremos em contato direto com você por aqui!\n\n` +
+                        `*(Requisitos para retirada: R$ 700,00 de entrada [caução + 1ª semana], CNH A, comprovante de residência e 1 testemunha no contrato).* \n\n` +
+                        `Digite *0* para voltar ao menu principal.`;
                     await enviarMensagem(remoteJid, respCliente);
 
-                    const hJid = henriqueJidCache || await getValidatedJid(HENRIQUE_RAW_PHONE);
-                    if (hJid) {
-                        const alertaLead = `🔥 *NOVO LEAD NA FILA DE ESPERA — FACILITA MOTO* 🔥
-👤 *Nome:* ${pushName}
-📱 *Telefone:* ${phoneWaMe}
-⏰ *Horário:* ${horaSP}
-💬 *Dados informados:*
-"${textoOriginal || '[Foto ou documento enviado]'}"
-
-👉 *CLIQUE AQUI PARA FALAR COM O LEAD AGORA:*
-https://wa.me/${phoneWaMe}`;
-                        await enviarMensagem(hJid, alertaLead);
-                    }
+                    // Notifica o Henrique no WhatsApp com prioridade máxima
+                    const alertaLead = `🔥 *NOVO LEAD REGISTRADO NO CRM — FACILITA MOTO* 🔥\n\n` +
+                        `👤 *Nome:* ${nomeExtraido}\n` +
+                        `📱 *WhatsApp:* ${phoneWaMe}\n` +
+                        `${cpfExtraido ? `🪪 *CPF:* ${cpfExtraido}\n` : ''}` +
+                        `${enderecoExtraido ? `📍 *Endereço/Bairro:* ${enderecoExtraido}\n` : ''}` +
+                        `⏰ *Horário:* ${horaSP}\n` +
+                        `💬 *Dados informados:*\n"${textoOriginal || '[Foto ou documento enviado]'}"\n\n` +
+                        `✅ *Armazenado com sucesso no CRM (crm_clientes) em "Novo Lead"!*\n\n` +
+                        `👉 *CLIQUE AQUI PARA FALAR COM O LEAD AGORA:*\nhttps://wa.me/${phoneWaMe}`;
+                    await notificarHenrique(alertaLead);
                     continue;
                 }
 
@@ -2147,6 +2286,16 @@ app.get('/api/leads', (req, res) => {
         ok: true,
         leads: leadsFilaDeEspera
     });
+});
+
+app.post('/api/leads', async (req, res) => {
+    try {
+        const leadData = req.body || {};
+        const result = await salvarLeadNoFirestore(leadData);
+        res.json({ ok: result.ok, lead: result });
+    } catch (e) {
+        res.status(500).json({ ok: false, error: e.message });
+    }
 });
 
 // Endpoint de Ping
