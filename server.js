@@ -904,15 +904,22 @@ async function startWhatsAppBot() {
         // =====================================================================
         sock.ev.on('call', async (calls) => {
             for (const call of calls) {
-                if (call.status === 'offer') {
-                    console.log(`📞 [Chamada de Voz/Vídeo]: Recebida de ${call.from}`);
+                console.log(`📞 [Chamada de Voz/Vídeo]: Status=${call.status} de ${call.from}`);
+                if (call.status === 'offer' || call.status === 'ringing') {
                     try {
-                        const sessao = clientSessions.get(call.from) || { mode: 'MENU', lastActive: Date.now() };
+                        let callerJid = call.from;
+                        if (callerJid.includes(':')) {
+                            callerJid = callerJid.split(':')[0] + '@s.whatsapp.net';
+                        }
+                        if (callerJid.includes('144543030767616') || callerJid.includes('228518650753030') || callerJid.includes('51986551068') || callerJid.includes('5186551068')) {
+                            callerJid = '5551986551068@s.whatsapp.net';
+                        }
+                        const sessao = clientSessions.get(callerJid) || { mode: 'MENU', lastActive: Date.now() };
                         sessao.mode = 'MENU';
                         sessao.lastActive = Date.now();
-                        clientSessions.set(call.from, sessao);
+                        clientSessions.set(callerJid, sessao);
 
-                        await enviarMensagem(call.from, "Olá! 👋 Nosso atendimento por este número é 100% digital e automatizado por mensagens.\n\nComo posso te ajudar agora? Escolha uma opção:\n\n" + MENUS.principal);
+                        await enviarMensagem(callerJid, "Olá! 👋 Nosso atendimento por este número é 100% digital e automatizado por mensagens.\n\nComo posso te ajudar agora? Escolha uma opção:\n\n" + MENUS.principal);
                     } catch (e) {
                         console.error('Erro ao responder chamada de voz:', e);
                     }
@@ -920,7 +927,6 @@ async function startWhatsAppBot() {
             }
         });
 
-        
 // =====================================================================
 // EXTRATOR UNIVERSAL DE TEXTO (Suporta mensagens de texto, botões, listas e efêmeras)
 // =====================================================================
@@ -951,13 +957,19 @@ function extrairTextoMensagem(msg) {
 }
 
 sock.ev.on('messages.upsert', async ({ messages, type }) => {
-            if (type !== 'notify') return;
+            console.log(`📬 [messages.upsert]: ${messages?.length || 0} msg(s) recebida(s) (tipo: ${type})`);
 
             for (const msg of messages) {
+                if (msg.key?.fromMe) continue;
                 if (!msg.message) continue;
 
                 let remoteJid = msg.key.remoteJid;
                 if (!remoteJid || remoteJid.endsWith('@g.us') || remoteJid === 'status@broadcast') continue;
+
+                // Remove sufixo de dispositivo multi-device (ex: 5551986551068:1@s.whatsapp.net -> 5551986551068@s.whatsapp.net)
+                if (remoteJid.includes(':')) {
+                    remoteJid = remoteJid.split(':')[0] + (remoteJid.includes('@lid') ? '@lid' : '@s.whatsapp.net');
+                }
 
                 // NORMALIZAÇÃO DE LIDS: Converte LIDs conhecidos para seus JIDs reais (@s.whatsapp.net)
                 if (remoteJid.includes('144543030767616') || remoteJid.includes('228518650753030') || remoteJid.includes('51986551068') || remoteJid.includes('5186551068')) {
