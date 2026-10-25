@@ -961,9 +961,8 @@ sock.ev.on('messages.upsert', async ({ messages, type }) => {
 
             for (const msg of messages) {
                 if (msg.key?.fromMe) continue;
-                if (!msg.message) continue;
 
-                let remoteJid = msg.key.remoteJid;
+                let remoteJid = msg.key?.remoteJid;
                 if (!remoteJid || remoteJid.endsWith('@g.us') || remoteJid === 'status@broadcast') continue;
 
                 // Remove sufixo de dispositivo multi-device (ex: 5551986551068:1@s.whatsapp.net -> 5551986551068@s.whatsapp.net)
@@ -976,6 +975,24 @@ sock.ev.on('messages.upsert', async ({ messages, type }) => {
                     remoteJid = '5551986551068@s.whatsapp.net';
                 } else if (remoteJid.includes('107941151653891') || remoteJid.includes('51984843741') || remoteJid.includes('5184843741')) {
                     remoteJid = '5551984843741@s.whatsapp.net';
+                }
+
+                // SE A MENSAGEM CHEGOU MAS O MOTOR NÃO CONSEGUIU DESCRIPTOGRAFAR (ERRO DE MAC / HANDSHAKE):
+                // NUNCA DEIXA O CLIENTE NO VÁCUO! Responde com o Menu Principal e limpa a sessão para renovação
+                if (!msg.message) {
+                    console.warn(`⚠️ [Decryption Fallback]: Mensagem recebida de ${remoteJid} sem payload legível. Limpando sessão corrompida e enviando Menu Principal!`);
+                    try {
+                        if (fs.existsSync(AUTH_FOLDER)) {
+                            const files = fs.readdirSync(AUTH_FOLDER);
+                            for (const f of files) {
+                                if (f.startsWith('session-')) {
+                                    fs.unlinkSync(path.join(AUTH_FOLDER, f));
+                                }
+                            }
+                        }
+                    } catch (e) {}
+                    await enviarMensagem(remoteJid, MENUS.principal);
+                    continue;
                 }
 
                 const textoOriginal = extrairTextoMensagem(msg);
