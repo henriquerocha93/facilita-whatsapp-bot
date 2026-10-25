@@ -546,14 +546,19 @@ async function buscarVeiculoCompleto(entrada) {
             const f = d.fields || {};
             const gov = f.dadosContratoGov?.mapValue?.fields || {};
             const val = f.valorSemanal?.stringValue || f.valorSemanal?.integerValue || f.valorSemanal?.doubleValue || gov['gov-fin-semanal']?.stringValue || 350;
+            const cliId = f.clienteId?.stringValue || '';
+            const mId = f.motoId?.stringValue || '';
+            const cliObj = clientes.find(c => c.id === cliId);
+            const mObj = motos.find(m => m.id === mId);
+
             return {
                 id: d.name.split('/').pop(),
-                clienteId: f.clienteId?.stringValue || '',
-                clienteNome: f.clienteNome?.stringValue || gov['gov-locatario-nome']?.stringValue || 'Condutor',
-                clienteCpf: (f.clienteCpf?.stringValue || gov['gov-locatario-cpf']?.stringValue || '').replace(/\D/g, ''),
-                clienteTelefone: (f.clienteTelefone?.stringValue || gov['gov-locatario-tel']?.stringValue || '').replace(/\D/g, ''),
-                motoId: f.motoId?.stringValue || '',
-                motoPlaca: (f.motoPlaca?.stringValue || gov['gov-moto-placa']?.stringValue || '').toUpperCase().replace(/[^A-Z0-9]/g, ''),
+                clienteId: cliId,
+                clienteNome: (f.clienteNome?.stringValue || gov['gov-locatario-nome']?.stringValue || cliObj?.nome || 'Condutor').trim(),
+                clienteCpf: (f.clienteCpf?.stringValue || gov['gov-locatario-cpf']?.stringValue || cliObj?.cpf || '').replace(/\D/g, ''),
+                clienteTelefone: (f.clienteTelefone?.stringValue || gov['gov-locatario-tel']?.stringValue || cliObj?.telefone || '').replace(/\D/g, ''),
+                motoId: mId,
+                motoPlaca: (f.motoPlaca?.stringValue || gov['gov-moto-placa']?.stringValue || mObj?.placa || '').toUpperCase().replace(/[^A-Z0-9]/g, ''),
                 dataProxVenc: f.dataProxVenc?.stringValue || gov['gov-prazo-inicio']?.stringValue || '',
                 valor: parseFloat(val) || 350.00,
                 status: f.status?.stringValue || 'ativo'
@@ -620,13 +625,25 @@ async function buscarVeiculoCompleto(entrada) {
                 }
             }
 
+            let nomeFinal = contratoMatch?.clienteNome || 'Condutor';
+            let telFinal = contratoMatch?.clienteTelefone || '';
+            let cpfFinal = contratoMatch?.clienteCpf || '';
+            if ((!nomeFinal || nomeFinal === 'Condutor') && contratoMatch?.clienteId) {
+                const cli = clientes.find(c => c.id === contratoMatch.clienteId);
+                if (cli && cli.nome) {
+                    nomeFinal = cli.nome.trim();
+                    telFinal = telFinal || cli.telefone;
+                    cpfFinal = cpfFinal || cli.cpf;
+                }
+            }
+
             return {
                 encontrado: true,
                 placa: motoMatch?.placa || contratoMatch?.motoPlaca || placaBusca,
                 modelo: motoMatch?.modelo || 'Honda CG 150',
-                clienteNome: contratoMatch?.clienteNome || 'Condutor',
-                clienteCpf: contratoMatch?.clienteCpf || '',
-                clienteTelefone: contratoMatch?.clienteTelefone || '',
+                clienteNome: nomeFinal,
+                clienteCpf: cpfFinal,
+                clienteTelefone: telFinal,
                 contratoId: contratoMatch?.id || '',
                 dataProxVenc: dataVenc,
                 vencimentoFormatado: vencFormatado,
@@ -1841,15 +1858,20 @@ async function executarRotinaAvisosAutomaticos() {
             const f = d.fields || {};
             const gov = f.dadosContratoGov?.mapValue?.fields || {};
             const val = f.valorSemanal?.stringValue || f.valorSemanal?.integerValue || f.valorSemanal?.doubleValue || gov['gov-fin-semanal']?.stringValue || 350;
+            const cliId = f.clienteId?.stringValue || '';
+            const mId = f.motoId?.stringValue || '';
+            const cliObj = clientes.find(c => c.id === cliId);
+            const mObj = motos.find(m => m.id === mId);
+
             return {
                 docName: d.name,
                 id: d.name.split('/').pop(),
-                clienteId: f.clienteId?.stringValue || '',
-                clienteNome: f.clienteNome?.stringValue || gov['gov-locatario-nome']?.stringValue || 'Condutor',
-                clienteCpf: (f.clienteCpf?.stringValue || gov['gov-locatario-cpf']?.stringValue || '').replace(/\D/g, ''),
-                clienteTelefone: (f.clienteTelefone?.stringValue || gov['gov-locatario-tel']?.stringValue || '').replace(/\D/g, ''),
-                motoId: f.motoId?.stringValue || '',
-                motoPlaca: (f.motoPlaca?.stringValue || gov['gov-moto-placa']?.stringValue || '').toUpperCase().replace(/[^A-Z0-9]/g, ''),
+                clienteId: cliId,
+                clienteNome: (f.clienteNome?.stringValue || gov['gov-locatario-nome']?.stringValue || cliObj?.nome || 'Condutor').trim(),
+                clienteCpf: (f.clienteCpf?.stringValue || gov['gov-locatario-cpf']?.stringValue || cliObj?.cpf || '').replace(/\D/g, ''),
+                clienteTelefone: (f.clienteTelefone?.stringValue || gov['gov-locatario-tel']?.stringValue || cliObj?.telefone || '').replace(/\D/g, ''),
+                motoId: mId,
+                motoPlaca: (f.motoPlaca?.stringValue || gov['gov-moto-placa']?.stringValue || mObj?.placa || '').toUpperCase().replace(/[^A-Z0-9]/g, ''),
                 dataProxVenc: f.dataProxVenc?.stringValue || gov['gov-prazo-inicio']?.stringValue || '',
                 valor: parseFloat(val) || 350.00,
                 status: f.status?.stringValue || 'ativo',
