@@ -51,7 +51,58 @@ const __dirname = path.dirname(__filename);
 // =====================================================================
 // AUTO-DESBLOQUEIO EM TEMPO REAL APÓS PAGAMENTO PIX NO MERCADO PAGO
 // =====================================================================
-function monitorarPagamentoEDesbloquear(paymentId, identificador, remoteJid) {
+async function confirmarBaixaNoFirestore(contratoId, placa, clienteNome, valor, paymentId) {
+    try {
+        if (!contratoId) return;
+        const resContrato = await fetch(`https://firestore.googleapis.com/v1/projects/${FIRESTORE_PROJECT_ID}/databases/(default)/documents/crm_contratos/${contratoId}?key=${FIRESTORE_API_KEY}`);
+        if (!resContrato.ok) return;
+        const contData = await resContrato.json();
+        const f = contData.fields || {};
+        const vencAtual = f.dataProxVenc?.stringValue || new Date().toISOString().split('T')[0];
+        
+        const d = new Date(vencAtual + 'T00:00:00');
+        d.setDate(d.getDate() + 7);
+        const novoVencIso = d.toISOString().split('T')[0];
+
+        // Atualiza contrato no Firestore com novo vencimento estendido (+7 dias)
+        await fetch(`https://firestore.googleapis.com/v1/projects/${FIRESTORE_PROJECT_ID}/databases/(default)/documents/crm_contratos/${contratoId}?updateMask.fieldPaths=dataProxVenc&updateMask.fieldPaths=bloqueado18hVencRef&key=${FIRESTORE_API_KEY}`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                fields: {
+                    dataProxVenc: { stringValue: novoVencIso },
+                    bloqueado18hVencRef: { stringValue: '' }
+                }
+            })
+        });
+
+        // Registra recibo de pagamento na coleção crm_pagamentos
+        const pagDocId = `PAG-MP-${paymentId || Date.now()}`;
+        await fetch(`https://firestore.googleapis.com/v1/projects/${FIRESTORE_PROJECT_ID}/databases/(default)/documents/crm_pagamentos/${pagDocId}?key=${FIRESTORE_API_KEY}`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                fields: {
+                    id: { stringValue: pagDocId },
+                    contratoId: { stringValue: contratoId },
+                    clienteNome: { stringValue: clienteNome || 'Locatário' },
+                    motoPlaca: { stringValue: placa || '' },
+                    valor: { doubleValue: parseFloat(valor) || 350.00 },
+                    formaPagamento: { stringValue: 'PIX' },
+                    data: { stringValue: new Date().toISOString().split('T')[0] },
+                    timestamp: { integerValue: String(Date.now()) },
+                    status: { stringValue: 'aprovado' },
+                    mercadopagoId: { stringValue: String(paymentId || '') }
+                }
+            })
+        });
+        console.log(`✅ [Firestore Pagamento] Baixa registrada no contrato ${contratoId}! Novo Vencimento: ${novoVencIso}`);
+    } catch (e) {
+        console.error('Erro ao registrar baixa no Firestore:', e.message);
+    }
+}
+
+function monitorarPagamentoEDesbloquear(paymentId, identificador, remoteJid, contratoId = '', clienteNome = '', valor = 350.00) {
     if (!paymentId) return;
     console.log(`🔍 [Auto-Desbloqueio] Monitorando pagamento Mercado Pago #${paymentId} para ${identificador}...`);
     let tentativas = 0;
@@ -78,7 +129,10 @@ function monitorarPagamentoEDesbloquear(paymentId, identificador, remoteJid) {
                 // Detecta qual moto desbloquear (suporta qualquer placa do sistema)
                 let placaDetectada = (identificador || '').replace(/[^A-Za-z0-9]/g, '').toUpperCase();
 
-                // 1. Dispara o desbloqueio satelital na API da Facilita Moto (Xtrack)
+                // 1. Registra a baixa no contrato estendendo a semana e salvando recibo
+                await confirmarBaixaNoFirestore(contratoId, placaDetectada, clienteNome, valor, paymentId);
+
+                // 2. Dispara o desbloqueio satelital na API da Facilita Moto (Xtrack)
                 try {
                     await fetch('https://www.facilitamoto.com.br/api/telemetry', {
                         method: 'POST',
@@ -87,30 +141,30 @@ function monitorarPagamentoEDesbloquear(paymentId, identificador, remoteJid) {
                             action: 'command_block',
                             bloquear: false,
                             placa: placaDetectada,
-                            motivo: `PIX Mercado Pago #${paymentId} Aprovado - Desbloqueio Automático via WhatsApp`
+                            motivo: `PIX Mercado Pago #${paymentId} Aprovado - Desbloqueio e Baixa Automática via WhatsApp`
                         })
                     });
                 } catch (e) {
                     console.error('Erro ao enviar desbloqueio para API de telemetria:', e.message);
                 }
 
-                // 2. Notifica o condutor no WhatsApp com confirmação oficial
+                // 3. Notifica o condutor no WhatsApp com confirmação oficial
                 const msgConfirmacao = `🎉 *PAGAMENTO CONFIRMADO NO BANCO MERCADO PAGO!* 🎉\n\n` +
-                    `🔓 *SUA MOTO (${placaDetectada}) FOI DESBLOQUEADA COM SUCESSO!* 🏍️💨\n\n` +
-                    `✅ O bloqueador via satélite foi desativado e o motor liberado na hora.\n` +
+                    `✅ *ALUGUEL RENOVADO COM SUCESSO!* 🏍️💨\n` +
+                    `• Veículo: *${placaDetectada}*\n` +
+                    `• Baixa registrada no sistema com novo vencimento estendido para a próxima semana!\n` +
+                    `• O bloqueador via satélite Xtrack foi desativado e o motor liberado na hora.\n\n` +
                     `Obrigado pelo pagamento! Tenha uma excelente rota e boa viagem com a Facilita Moto! 🚀`;
                 await enviarMensagem(remoteJid, msgConfirmacao);
 
-                // 3. Notifica o Henrique no WhatsApp particular
-                const hJid = henriqueJidCache || await getValidatedJid(HENRIQUE_RAW_PHONE);
-                if (hJid) {
-                    const alertaHenrique = `💰 *PIX DE DESBLOQUEIO PAGO NO MERCADO PAGO!* 💰\n` +
-                        `• Veículo: *${placaDetectada}*\n` +
-                        `• Valor: *R$ 350,00*\n` +
-                        `• ID Pagamento: #${paymentId}\n` +
-                        `• Status: *MOTO DESBLOQUEADA AUTOMATICAMENTE NO SATÉLITE!* 🔓`;
-                    await enviarMensagem(hJid, alertaHenrique);
-                }
+                // 4. Notifica o Henrique no WhatsApp particular
+                const alertaHenrique = `💰 *PIX RECEBIDO COM SUCESSO NO MERCADO PAGO!* 💰\n` +
+                    `• Veículo: *${placaDetectada}*\n` +
+                    `• Locatário: *${clienteNome || 'Condutor'}*\n` +
+                    `• Valor: *R$ ${(parseFloat(valor) || 350).toFixed(2)}*\n` +
+                    `• ID Pagamento: #${paymentId}\n` +
+                    `• Status: *CONTRATO RENOVADO E MOTO LIBERADA NO SATÉLITE!* 🔓`;
+                await notificarHenrique(alertaHenrique);
             }
         } catch (err) {
             console.warn('Erro ao verificar status do pagamento:', err.message);
@@ -441,6 +495,15 @@ function gerarPayloadPixBrCode({ chavePix, nomeBeneficiario, cidade, valor, txid
 
 // Gera cobrança PIX Oficial do Mercado Pago
 
+function formatarDataBr(isoDate) {
+    if (!isoDate || typeof isoDate !== 'string') return '';
+    const parts = isoDate.split('T')[0].split('-');
+    if (parts.length === 3) {
+        return `${parts[2]}/${parts[1]}/${parts[0]}`;
+    }
+    return isoDate;
+}
+
 // =====================================================================
 // BUSCA DINÂMICA DE TODAS AS MOTOS E CONTRATOS DO SISTEMA NO FIRESTORE
 // =====================================================================
@@ -462,6 +525,9 @@ async function buscarVeiculoCompleto(entrada) {
                 id: d.name.split('/').pop(),
                 placa: (f.placa?.stringValue || '').toUpperCase().replace(/[^A-Z0-9]/g, ''),
                 modelo: f.modelo?.stringValue || 'Moto',
+                kmAtual: parseInt(f.kmAtual?.integerValue || f.kmAtual?.stringValue || 0),
+                kmUltimaTroca: parseInt(f.kmUltimaTroca?.integerValue || f.kmUltimaTroca?.stringValue || 0),
+                kmProximaTroca: parseInt(f.kmProximaTroca?.integerValue || f.kmProximaTroca?.stringValue || 0),
                 rastreadorImei: f.rastreadorImei?.stringValue || ''
             };
         });
@@ -478,14 +544,17 @@ async function buscarVeiculoCompleto(entrada) {
 
         const contratos = (resContratos.documents || []).map(d => {
             const f = d.fields || {};
-            const pix = f.pixCobrancaAtual?.mapValue?.fields || {};
-            const val = f.valorSemanal?.stringValue || f.valorSemanal?.integerValue || f.valorSemanal?.doubleValue || pix.valor?.stringValue || pix.valor?.integerValue || 350;
+            const gov = f.dadosContratoGov?.mapValue?.fields || {};
+            const val = f.valorSemanal?.stringValue || f.valorSemanal?.integerValue || f.valorSemanal?.doubleValue || gov['gov-fin-semanal']?.stringValue || 350;
             return {
                 id: d.name.split('/').pop(),
                 clienteId: f.clienteId?.stringValue || '',
-                clienteNome: f.clienteNome?.stringValue || pix.clienteNome?.stringValue || '',
+                clienteNome: f.clienteNome?.stringValue || gov['gov-locatario-nome']?.stringValue || 'Condutor',
+                clienteCpf: (f.clienteCpf?.stringValue || gov['gov-locatario-cpf']?.stringValue || '').replace(/\D/g, ''),
+                clienteTelefone: (f.clienteTelefone?.stringValue || gov['gov-locatario-tel']?.stringValue || '').replace(/\D/g, ''),
                 motoId: f.motoId?.stringValue || '',
-                motoPlaca: (f.motoPlaca?.stringValue || pix.motoPlaca?.stringValue || '').toUpperCase().replace(/[^A-Z0-9]/g, ''),
+                motoPlaca: (f.motoPlaca?.stringValue || gov['gov-moto-placa']?.stringValue || '').toUpperCase().replace(/[^A-Z0-9]/g, ''),
+                dataProxVenc: f.dataProxVenc?.stringValue || gov['gov-prazo-inicio']?.stringValue || '',
                 valor: parseFloat(val) || 350.00,
                 status: f.status?.stringValue || 'ativo'
             };
@@ -500,29 +569,69 @@ async function buscarVeiculoCompleto(entrada) {
             if (motoMatch) {
                 contratoMatch = contratos.find(c => c.motoPlaca === motoMatch.placa || c.motoId === motoMatch.id);
             }
-        }
-
-        // 2. Procura por CPF
-        if (!motoMatch && digitos.length >= 8) {
-            const clienteMatch = clientes.find(cli => cli.cpf.includes(digitos) || digitos.includes(cli.cpf));
-            if (clienteMatch) {
-                contratoMatch = contratos.find(c => c.clienteId === clienteMatch.id || (c.clienteNome && c.clienteNome.toLowerCase().includes(clienteMatch.nome.toLowerCase())));
-                if (contratoMatch && contratoMatch.motoPlaca) {
+            if (!contratoMatch) {
+                contratoMatch = contratos.find(c => c.motoPlaca === placaBusca || c.motoPlaca.includes(placaBusca));
+                if (contratoMatch && !motoMatch) {
                     motoMatch = motos.find(m => m.placa === contratoMatch.motoPlaca || m.id === contratoMatch.motoId);
                 }
             }
         }
 
-        if (contratoMatch && !motoMatch && contratoMatch.motoPlaca) {
-            motoMatch = motos.find(m => m.placa === contratoMatch.motoPlaca);
+        // 2. Procura por CPF
+        if (!contratoMatch && digitos.length >= 8) {
+            contratoMatch = contratos.find(c => c.clienteCpf && (c.clienteCpf.includes(digitos) || digitos.includes(c.clienteCpf)));
+            if (!contratoMatch) {
+                const clienteMatch = clientes.find(cli => cli.cpf && (cli.cpf.includes(digitos) || digitos.includes(cli.cpf)));
+                if (clienteMatch) {
+                    contratoMatch = contratos.find(c => c.clienteId === clienteMatch.id || (c.clienteNome && c.clienteNome.toLowerCase().includes(clienteMatch.nome.toLowerCase())));
+                }
+            }
+            if (contratoMatch) {
+                motoMatch = motos.find(m => m.placa === contratoMatch.motoPlaca || m.id === contratoMatch.motoId);
+            }
+        }
+
+        // 3. Procura por Nome
+        if (!contratoMatch && limpo.length >= 3 && !/^\d+$/.test(limpo)) {
+            contratoMatch = contratos.find(c => c.clienteNome && c.clienteNome.toUpperCase().includes(limpo));
+            if (contratoMatch) {
+                motoMatch = motos.find(m => m.placa === contratoMatch.motoPlaca || m.id === contratoMatch.motoId);
+            }
         }
 
         if (motoMatch || contratoMatch) {
+            const dataVenc = contratoMatch?.dataProxVenc || '';
+            let diffDays = null;
+            let statusPagamento = 'SEM_VENCIMENTO';
+            let vencFormatado = dataVenc ? formatarDataBr(dataVenc) : 'Não definida';
+
+            if (dataVenc) {
+                const hoje = getSaoPauloDate();
+                hoje.setHours(0, 0, 0, 0);
+                const vencObj = new Date(dataVenc + 'T00:00:00');
+                diffDays = Math.ceil((vencObj.getTime() - hoje.getTime()) / (1000 * 60 * 60 * 24));
+
+                if (diffDays < 0) {
+                    statusPagamento = 'ATRASADO';
+                } else if (diffDays === 0) {
+                    statusPagamento = 'VENCE_HOJE';
+                } else {
+                    statusPagamento = 'EM_DIA';
+                }
+            }
+
             return {
                 encontrado: true,
                 placa: motoMatch?.placa || contratoMatch?.motoPlaca || placaBusca,
                 modelo: motoMatch?.modelo || 'Honda CG 150',
                 clienteNome: contratoMatch?.clienteNome || 'Condutor',
+                clienteCpf: contratoMatch?.clienteCpf || '',
+                clienteTelefone: contratoMatch?.clienteTelefone || '',
+                contratoId: contratoMatch?.id || '',
+                dataProxVenc: dataVenc,
+                vencimentoFormatado: vencFormatado,
+                diffDays,
+                statusPagamento,
                 valor: contratoMatch?.valor || 350.00
             };
         }
@@ -534,11 +643,8 @@ async function buscarVeiculoCompleto(entrada) {
     } catch (e) {
         console.warn('Erro ao buscar veículos no Firestore:', e.message);
         return {
-            encontrado: true,
-            placa: placaBusca || 'IPU2I57',
-            modelo: 'Honda CG 150',
-            clienteNome: 'Condutor',
-            valor: 350.00
+            encontrado: false,
+            erro: e.message
         };
     }
 }
@@ -599,6 +705,48 @@ async function criarPixMercadoPago(identificador = 'Cliente', valorPersonalizado
         pixCopiaECola,
         paymentId
     };
+}
+
+async function gerarEEnviarPixCobranca(targetJid, veiculo) {
+    const descIdentificador = `${veiculo.placa} - ${veiculo.clienteNome}`;
+    const pixData = await criarPixMercadoPago(descIdentificador, veiculo.valor);
+
+    let statusTexto = '📅 *Vencimento:* ' + (veiculo.vencimentoFormatado || 'Em aberto');
+    if (veiculo.statusPagamento === 'VENCE_HOJE') {
+        statusTexto = '☀️ *VENCE HOJE!* (Pagar até as 18h para evitar bloqueio)';
+    } else if (veiculo.statusPagamento === 'ATRASADO') {
+        statusTexto = `🚨 *FATURA EM ATRASO HÁ ${Math.abs(veiculo.diffDays || 1)} DIA(S)* (Pague para liberação imediata)`;
+    } else if (veiculo.statusPagamento === 'ANTECIPADO') {
+        statusTexto = `⚡ *PAGAMENTO ANTECIPADO* (Próximo Vencimento: ${veiculo.vencimentoFormatado})`;
+    }
+
+    const textoPix = `💳 *2ª VIA PIX SEMANAL — FACILITA MOTO* 🏍️💨\n\n` +
+        `👤 *Locatário:* ${veiculo.clienteNome}\n` +
+        `🏍️ *Veículo:* ${veiculo.placa} (${veiculo.modelo})\n` +
+        `📋 *Situação:* ${statusTexto}\n` +
+        `💰 *Valor Semanal:* R$ ${parseFloat(veiculo.valor || 350).toFixed(2)}\n` +
+        `🏦 *Beneficiário:* Henrique Rocha Clavijo (Mercado Pago Oficial)\n` +
+        `⚡ *Baixa no Sistema:* Automática após o pagamento!\n\n` +
+        `👇 *Copie o código PIX Copia e Cola abaixo para pagar:*`;
+
+    await enviarMensagem(targetJid, textoPix);
+
+    setTimeout(async () => {
+        await enviarMensagem(targetJid, pixData.pixCopiaECola);
+
+        setTimeout(async () => {
+            await enviarMensagem(targetJid, `📲 *Como pagar:*\n` +
+                `1. Abra o app do seu banco e escolha *PIX Copia e Cola*.\n` +
+                `2. Cole o código acima e confirme o pagamento.\n` +
+                `3. O sistema reconhece automaticamente em até 2 minutos, atualiza seu contrato e mantém sua moto liberada! 🔓🚀\n\n` +
+                `Digite *0* para voltar ao menu principal.`);
+        }, 800);
+    }, 500);
+
+    if (pixData.paymentId) {
+        monitorarPagamentoEDesbloquear(pixData.paymentId, veiculo.placa, targetJid, veiculo.contratoId, veiculo.clienteNome, veiculo.valor);
+    }
+    return pixData;
 }
 
 async function getValidatedJid(numero, ehHenrique = false) {
@@ -869,6 +1017,9 @@ async function startWhatsAppBot() {
 
                 agendarSalvamentoSessaoNuvem();
                 atualizarIdentidadesHenrique().catch(e => console.warn('Erro ao atualizar identidades:', e));
+                setTimeout(() => {
+                    executarRotinaAvisosAutomaticos().catch(e => console.warn('Erro na rotina inicial de avisos:', e));
+                }, 15000);
             }
         });
 
@@ -1157,35 +1308,21 @@ sock.ev.on('messages.upsert', async ({ messages, type }) => {
                         sessao.mode = 'MENU';
                         clientSessions.set(remoteJid, sessao);
 
-                        const descIdentificador = `${veiculo.placa} - ${veiculo.clienteNome}`;
-                        const pixData = await criarPixMercadoPago(descIdentificador, veiculo.valor);
-
-                        const textoPix = `✅ *DADOS LOCALIZADOS COM SUCESSO!* 🏍️🔑\n\n` +
-                            `🏍️ *Veículo:* ${veiculo.placa} (${veiculo.modelo})\n` +
-                            `👤 *Locatário:* ${veiculo.clienteNome}\n` +
-                            `💰 *Valor do Desbloqueio:* R$ ${veiculo.valor.toFixed(2)}\n` +
-                            `🏦 *Beneficiário:* Henrique Rocha Clavijo (Mercado Pago Oficial)\n` +
-                            `⚡ *Desbloqueio:* Imediato via satélite Xtrack após o pagamento!\n\n` +
-                            `📋 *Copie o código PIX Copia e Cola abaixo para pagar:*`;
-
-                        await enviarMensagem(remoteJid, textoPix);
-
-                        setTimeout(async () => {
-                            await enviarMensagem(remoteJid, pixData.pixCopiaECola);
-
-                            setTimeout(async () => {
-                                await enviarMensagem(remoteJid, `📲 *Como funciona o Desbloqueio Automático:*\n` +
-                                    `1. Abra o app do seu banco e escolha *PIX Copia e Cola*.\n` +
-                                    `2. Cole o código acima e pague.\n` +
-                                    `3. O Mercado Pago avisa nosso sistema e a sua moto *${veiculo.placa}* é *DESBLOQUEADA NA HORA* via satélite! 🔓🚀\n\n` +
-                                    `*(Estamos aguardando seu pagamento. Assim que pagar, você receberá a confirmação aqui!)*\n` +
-                                    `Digite *0* para voltar ao menu.`);
-                            }, 800);
-                        }, 500);
-
-                        if (pixData.paymentId) {
-                            monitorarPagamentoEDesbloquear(pixData.paymentId, veiculo.placa, remoteJid);
+                        // Se o pagamento já está em dia, não cobra PIX e envia comando de desbloqueio satelital imediato
+                        if (veiculo.statusPagamento === 'EM_DIA') {
+                            enviarComandoXtrack(veiculo.placa, false, 'Solicitação desbloqueio cliente em dia').catch(() => {});
+                            const msgEmDiaDesbloqueio = `🟢 *SEU PAGAMENTO JÁ ESTÁ TOTALMENTE EM DIA!* 🏍️✨\n\n` +
+                                `👤 *Condutor:* ${veiculo.clienteNome}\n` +
+                                `🏍️ *Moto:* ${veiculo.placa} (${veiculo.modelo})\n` +
+                                `📅 *Próximo Vencimento:* *${veiculo.vencimentoFormatado}* (faltam ${veiculo.diffDays} dia(s))\n\n` +
+                                `🔓 *Comando de DESBLOQUEIO via satélite enviado com sucesso!* A ignição da sua motocicleta estará liberada em até 1 minuto.\n\n` +
+                                `Digite *0* para voltar ao menu principal.`;
+                            await enviarMensagem(remoteJid, msgEmDiaDesbloqueio);
+                            continue;
                         }
+
+                        // Se está vencido ou vence hoje, gera cobrança e monitora desbloqueio pós-PIX
+                        await gerarEEnviarPixCobranca(remoteJid, veiculo);
                     } catch (errUnlock) {
                         console.error('Erro no fluxo de desbloqueio:', errUnlock);
                         await enviarMensagem(remoteJid, `⚠️ Ocorreu uma oscilação momentânea ao gerar a cobrança. Digite *3* para tentar novamente ou *5* para falar com o atendente.`);
@@ -1250,39 +1387,70 @@ https://wa.me/${phoneWaMe}`;
 
                 // 3.3. SE O CLIENTE ESTAVA AGUARDANDO NOME/CPF/PLACA PARA O PIX
                 if (sessao.mode === 'WAITING_PIX_INFO') {
+                    if (texto === '0' || textoLower === 'menu' || textoLower === 'voltar' || textoLower === 'sair') {
+                        sessao.mode = 'MENU';
+                        clientSessions.set(remoteJid, sessao);
+                        await enviarMenuComAntiSpam(remoteJid, MENUS.principal);
+                        continue;
+                    }
+
+                    await enviarMensagem(remoteJid, `🔍 *Consultando contrato e situação da moto no sistema... Só um instante!*`);
+
+                    const veiculo = await buscarVeiculoCompleto(textoOriginal);
+
+                    if (!veiculo || !veiculo.encontrado) {
+                        await enviarMensagem(remoteJid, `❌ *NENHUM CONTRATO ATIVO ENCONTRADO!*\n\nNão localizamos nenhum contrato ativo com o dado informado: *"${textoOriginal}"*.\n\n👉 *Por favor, digite a PLACA correta (ex: IMJ6E36 ou IPU2I57) ou o seu CPF (somente números):*\n*(Ou digite 0 para voltar ao menu)*`);
+                        continue;
+                    }
+
+                    // Se a moto foi localizada e o pagamento já está em dia:
+                    if (veiculo.statusPagamento === 'EM_DIA') {
+                        sessao.mode = 'CONFIRMA_ANTECIPAR_PIX';
+                        sessao.veiculoPendente = veiculo;
+                        clientSessions.set(remoteJid, sessao);
+
+                        const msgEmDia = `🟢 *PAGAMENTO TOTALMENTE EM DIA!* 🏍️✨\n\n` +
+                            `👤 *Condutor:* ${veiculo.clienteNome}\n` +
+                            `🏍️ *Moto:* ${veiculo.placa} (${veiculo.modelo})\n` +
+                            `📅 *Próximo Vencimento:* *${veiculo.vencimentoFormatado}* (faltam ${veiculo.diffDays} dia(s))\n` +
+                            `💰 *Valor Semanal:* R$ ${parseFloat(veiculo.valor || 350).toFixed(2)}\n\n` +
+                            `🎉 *Você não possui nenhuma fatura pendente ou em atraso!*\n` +
+                            `Sua motocicleta está liberada e com o cadastro 100% regularizado.\n\n` +
+                            `*Deseja antecipar o pagamento da próxima semana agora?*\n\n` +
+                            `*1* - ⚡ *Sim, gerar PIX para antecipar próxima semana*\n` +
+                            `*0* - 🏁 *Não, voltar ao menu principal*`;
+
+                        await enviarMensagem(remoteJid, msgEmDia);
+                        continue;
+                    }
+
+                    // Se vence hoje ou está em atraso, gera o PIX oficial com baixa automática
                     sessao.mode = 'MENU';
                     clientSessions.set(remoteJid, sessao);
-
-                    await enviarMensagem(remoteJid, `⏳ *Gerando o seu código PIX no Mercado Pago... Só um instante!*`);
-
-                    const pixData = await criarPixMercadoPago(textoOriginal || pushName);
-
-                    const textoPix = `✅ *PIX GERADO COM SUCESSO!* 🏍️💨
-
-👤 *Locatário:* ${pixData.identificador}
-💰 *Valor Semanal:* R$ ${pixData.valor}
-🏦 *Beneficiário:* Henrique Rocha Clavijo (Mercado Pago Oficial)
-⚡ *Compensação:* Automática no sistema
-
-👇 *Copie o código PIX Copia e Cola abaixo:*`;
-
-                    await enviarMensagem(remoteJid, textoPix);
-
-                    setTimeout(async () => {
-                        await enviarMensagem(remoteJid, pixData.pixCopiaECola);
-
-                        setTimeout(async () => {
-                            await enviarMensagem(remoteJid, `📱 *Como pagar:*
-1. Abra o app do seu banco
-2. Escolha a opção *PIX Copia e Cola*
-3. Cole o código acima e confirme o pagamento
-
-Assim que você pagar, o sistema reconhece em até 2 minutos e confirma o recebimento automaticamente!
-Digite *0* para voltar ao menu principal.`);
-                        }, 800);
-                    }, 500);
-
+                    await gerarEEnviarPixCobranca(remoteJid, veiculo);
                     continue;
+                }
+
+                // 3.31. CONFIRMAÇÃO DE ANTECIPAÇÃO DE PIX QUANDO O CLIENTE JÁ ESTÁ EM DIA
+                if (sessao.mode === 'CONFIRMA_ANTECIPAR_PIX') {
+                    const v = sessao.veiculoPendente;
+                    const querAntecipar = texto === '1' || textoLower.includes('sim') || textoLower.includes('antecipar') || textoLower === 's';
+
+                    if (querAntecipar && v) {
+                        sessao.mode = 'MENU';
+                        delete sessao.veiculoPendente;
+                        clientSessions.set(remoteJid, sessao);
+
+                        v.statusPagamento = 'ANTECIPADO';
+                        await gerarEEnviarPixCobranca(remoteJid, v);
+                        continue;
+                    } else {
+                        sessao.mode = 'MENU';
+                        delete sessao.veiculoPendente;
+                        clientSessions.set(remoteJid, sessao);
+                        await enviarMensagem(remoteJid, `👍 Perfeito! Seu pagamento continua em dia. Nos vemos no próximo vencimento (*${v?.vencimentoFormatado || ''}*)!\n\n` + MENUS.principal);
+                        continue;
+                    }
                 }
 
                 // -------------------------------------------------------------
@@ -1569,24 +1737,42 @@ Qualquer mensagem que você digitar agora será entregue ao cliente pelo WhatsAp
                     continue;
                 }
 
-                // Se o usuário digitou um CPF ou Placa direto, gera o PIX automaticamente
+                // Se o usuário digitou um CPF ou Placa direto, consulta o sistema antes de gerar PIX
                 const ehCpf = /^\d{11}$/.test(texto.replace(/\D/g, '')) || /^\d{3}\.\d{3}\.\d{3}\-\d{2}$/.test(texto);
                 const ehPlaca = /^[a-zA-Z]{3}[0-9][a-zA-Z0-9][0-9]{2}$/.test(texto.replace(/\W/g, ''));
                 if (ehCpf || ehPlaca) {
-                    await enviarMensagem(remoteJid, `⏳ *Identificamos sua solicitação! Gerando seu PIX no Mercado Pago...*`);
-                    const pixData = await criarPixMercadoPago(textoOriginal);
-                    const textoPix = `✅ *PIX GERADO COM SUCESSO!* 🏍️💨
+                    await enviarMensagem(remoteJid, `🔍 *Localizando contrato e situação da moto no sistema... Só um instante!*`);
+                    const veiculo = await buscarVeiculoCompleto(textoOriginal);
 
-👤 *Referência:* ${pixData.identificador}
-💰 *Valor Semanal:* R$ ${pixData.valor}
-🏦 *Beneficiário:* Henrique Rocha Clavijo (Mercado Pago Oficial)
+                    if (veiculo && veiculo.encontrado) {
+                        if (veiculo.statusPagamento === 'EM_DIA') {
+                            sessao.mode = 'CONFIRMA_ANTECIPAR_PIX';
+                            sessao.veiculoPendente = veiculo;
+                            clientSessions.set(remoteJid, sessao);
 
-👇 *Copie o código PIX Copia e Cola abaixo:*`;
-                    await enviarMensagem(remoteJid, textoPix);
-                    setTimeout(async () => {
-                        await enviarMensagem(remoteJid, pixData.pixCopiaECola);
-                    }, 500);
-                    continue;
+                            const msgEmDia = `🟢 *PAGAMENTO TOTALMENTE EM DIA!* 🏍️✨\n\n` +
+                                `👤 *Condutor:* ${veiculo.clienteNome}\n` +
+                                `🏍️ *Moto:* ${veiculo.placa} (${veiculo.modelo})\n` +
+                                `📅 *Próximo Vencimento:* *${veiculo.vencimentoFormatado}* (faltam ${veiculo.diffDays} dia(s))\n` +
+                                `💰 *Valor Semanal:* R$ ${parseFloat(veiculo.valor || 350).toFixed(2)}\n\n` +
+                                `🎉 *Você não possui nenhuma fatura pendente ou em atraso!*\n` +
+                                `Sua motocicleta está liberada e com o cadastro 100% regularizado.\n\n` +
+                                `*Deseja antecipar o pagamento da próxima semana agora?*\n\n` +
+                                `*1* - ⚡ *Sim, gerar PIX para antecipar próxima semana*\n` +
+                                `*0* - 🏁 *Não, voltar ao menu principal*`;
+
+                            await enviarMensagem(remoteJid, msgEmDia);
+                            continue;
+                        } else {
+                            sessao.mode = 'MENU';
+                            clientSessions.set(remoteJid, sessao);
+                            await gerarEEnviarPixCobranca(remoteJid, veiculo);
+                            continue;
+                        }
+                    } else {
+                        await enviarMensagem(remoteJid, `❌ *Nenhum contrato ativo localizado para "${textoOriginal}".*\n\nPor favor, envie a placa correta da sua moto ou o seu CPF cadastrado.\nDigite *0* para voltar ao menu principal.`);
+                        continue;
+                    }
                 }
 
                 // Padrão: Apresenta o Menu Principal (com proteção anti-spam para evitar múltiplos disparos no mesmo contato)
@@ -1600,8 +1786,251 @@ Qualquer mensagem que você digitar agora será entregue ao cliente pelo WhatsAp
     }
 }
 
+// =====================================================================
+// MOTOR DE DISPARO AUTÔNOMO: AVISOS SEMANAIS E TROCA DE ÓLEO 1.000 KM
+// Executado periodicamente a cada 15 min 100% sem intervenção humana
+// =====================================================================
+let rotinaAvisosEmExecucao = false;
+
+async function executarRotinaAvisosAutomaticos() {
+    if (rotinaAvisosEmExecucao || !sock || !isConnected) return;
+    rotinaAvisosEmExecucao = true;
+
+    try {
+        const agoraSP = getSaoPauloDate();
+        const horaAtual = agoraSP.getHours();
+        const minutosAtual = agoraSP.getMinutes();
+        const hojeIso = agoraSP.toISOString().split('T')[0];
+        const hojeBr = formatarDataBr(hojeIso);
+
+        console.log(`🤖 [Rotina Autônoma]: Verificando cobranças e troca de óleo às ${horaAtual}:${minutosAtual < 10 ? '0' + minutosAtual : minutosAtual} (${hojeIso})...`);
+
+        // Busca coleções crm_contratos, crm_motos e crm_clientes no Firestore
+        const [resMotos, resContratos, resClientes] = await Promise.all([
+            fetch(`https://firestore.googleapis.com/v1/projects/${FIRESTORE_PROJECT_ID}/databases/(default)/documents/crm_motos?key=${FIRESTORE_API_KEY}`).then(r => r.json()),
+            fetch(`https://firestore.googleapis.com/v1/projects/${FIRESTORE_PROJECT_ID}/databases/(default)/documents/crm_contratos?key=${FIRESTORE_API_KEY}`).then(r => r.json()),
+            fetch(`https://firestore.googleapis.com/v1/projects/${FIRESTORE_PROJECT_ID}/databases/(default)/documents/crm_clientes?key=${FIRESTORE_API_KEY}`).then(r => r.json())
+        ]);
+
+        const motos = (resMotos.documents || []).map(d => {
+            const f = d.fields || {};
+            return {
+                docName: d.name,
+                id: d.name.split('/').pop(),
+                placa: (f.placa?.stringValue || '').toUpperCase().replace(/[^A-Z0-9]/g, ''),
+                modelo: f.modelo?.stringValue || 'Moto',
+                kmAtual: parseInt(f.kmAtual?.integerValue || f.kmAtual?.stringValue || 0),
+                kmUltimaTroca: parseInt(f.kmUltimaTroca?.integerValue || f.kmUltimaTroca?.stringValue || 0),
+                kmProximaTroca: parseInt(f.kmProximaTroca?.integerValue || f.kmProximaTroca?.stringValue || 0),
+                rastreadorImei: f.rastreadorImei?.stringValue || '',
+                ultimoAvisoOleoData: f.ultimoAvisoOleoData?.stringValue || ''
+            };
+        });
+
+        const clientes = (resClientes.documents || []).map(d => {
+            const f = d.fields || {};
+            return {
+                id: d.name.split('/').pop(),
+                nome: f.nome?.stringValue || 'Condutor',
+                cpf: (f.cpf?.stringValue || '').replace(/\D/g, ''),
+                telefone: (f.telefone?.stringValue || '').replace(/\D/g, '')
+            };
+        });
+
+        const contratos = (resContratos.documents || []).map(d => {
+            const f = d.fields || {};
+            const gov = f.dadosContratoGov?.mapValue?.fields || {};
+            const val = f.valorSemanal?.stringValue || f.valorSemanal?.integerValue || f.valorSemanal?.doubleValue || gov['gov-fin-semanal']?.stringValue || 350;
+            return {
+                docName: d.name,
+                id: d.name.split('/').pop(),
+                clienteId: f.clienteId?.stringValue || '',
+                clienteNome: f.clienteNome?.stringValue || gov['gov-locatario-nome']?.stringValue || 'Condutor',
+                clienteCpf: (f.clienteCpf?.stringValue || gov['gov-locatario-cpf']?.stringValue || '').replace(/\D/g, ''),
+                clienteTelefone: (f.clienteTelefone?.stringValue || gov['gov-locatario-tel']?.stringValue || '').replace(/\D/g, ''),
+                motoId: f.motoId?.stringValue || '',
+                motoPlaca: (f.motoPlaca?.stringValue || gov['gov-moto-placa']?.stringValue || '').toUpperCase().replace(/[^A-Z0-9]/g, ''),
+                dataProxVenc: f.dataProxVenc?.stringValue || gov['gov-prazo-inicio']?.stringValue || '',
+                valor: parseFloat(val) || 350.00,
+                status: f.status?.stringValue || 'ativo',
+                ultimoAvisoVencimentoData: f.ultimoAvisoVencimentoData?.stringValue || '',
+                ultimoAvisoAtrasoData: f.ultimoAvisoAtrasoData?.stringValue || ''
+            };
+        }).filter(c => c.status !== 'encerrado');
+
+        // =================================================================
+        // 1. AVISOS DE PAGAMENTO SEMANAL (SEM INTERVENÇÃO HUMANA)
+        // =================================================================
+        for (const contrato of contratos) {
+            if (!contrato.dataProxVenc) continue;
+
+            const vencObj = new Date(contrato.dataProxVenc + 'T00:00:00');
+            const hojeObj = new Date(hojeIso + 'T00:00:00');
+            const diffDays = Math.ceil((vencObj.getTime() - hojeObj.getTime()) / (1000 * 60 * 60 * 24));
+
+            let telCli = contrato.clienteTelefone;
+            if (!telCli && contrato.clienteId) {
+                const cMatch = clientes.find(x => x.id === contrato.clienteId);
+                if (cMatch) telCli = cMatch.telefone;
+            }
+            if (!telCli) continue;
+
+            const motoObj = motos.find(m => m.placa === contrato.motoPlaca || m.id === contrato.motoId) || { placa: contrato.motoPlaca, modelo: 'Moto' };
+            const jidCli = await getValidatedJid(telCli);
+            if (!jidCli) continue;
+
+            // 1.1. VENCE HOJE (diffDays === 0) - Disparo a partir das 08h00 da manhã
+            if (diffDays === 0 && horaAtual >= 8) {
+                if (contrato.ultimoAvisoVencimentoData !== hojeIso) {
+                    console.log(`📢 [Aviso Pagamento 08h]: Enviando para ${contrato.clienteNome} (${motoObj.placa})...`);
+
+                    const pixData = await criarPixMercadoPago(`${motoObj.placa} - ${contrato.clienteNome}`, contrato.valor);
+
+                    const msgVencHoje = `☀️ *AVISO DE VENCIMENTO SEMANAL (08:00H) — FACILITA MOTO* 🏍️💨\n\n` +
+                        `Olá, *${contrato.clienteNome}*! Tudo bem?\n` +
+                        `Lembramos que hoje (*${hojeBr}*) é o dia do pagamento semanal da sua motocicleta *${motoObj.modelo} (Placa: ${motoObj.placa})*.\n\n` +
+                        `💰 *Valor Semanal:* R$ ${contrato.valor.toFixed(2)}\n` +
+                        `⏰ *Horário Limite:* Até as *18:00h* de hoje\n\n` +
+                        `⚠️ *Aviso Importante:* Realize o pagamento até as 18h para evitar o bloqueio via satélite da sua moto!\n\n` +
+                        `👇 *Copie o código PIX Copia e Cola do Mercado Pago abaixo:*`;
+
+                    await enviarMensagem(jidCli, msgVencHoje);
+                    await new Promise(r => setTimeout(r, 600));
+                    await enviarMensagem(jidCli, pixData.pixCopiaECola);
+                    await new Promise(r => setTimeout(r, 800));
+                    await enviarMensagem(jidCli, `📱 *Como pagar:*\n1. Abra o app do seu banco e escolha *PIX Copia e Cola*.\n2. Cole o código acima e confirme o pagamento.\n3. O sistema reconhece em até 2 minutos, atualiza seu contrato para a próxima semana e mantém sua moto liberada! 🚀`);
+
+                    await fetch(`https://firestore.googleapis.com/v1/${contrato.docName}?updateMask.fieldPaths=ultimoAvisoVencimentoData&key=${FIRESTORE_API_KEY}`, {
+                        method: 'PATCH',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ fields: { ultimoAvisoVencimentoData: { stringValue: hojeIso } } })
+                    }).catch(() => {});
+
+                    if (pixData.paymentId) {
+                        monitorarPagamentoEDesbloquear(pixData.paymentId, motoObj.placa, jidCli, contrato.id, contrato.clienteNome, contrato.valor);
+                    }
+                }
+            }
+
+            // 1.2. EM ATRASO (diffDays < 0) - Disparo a partir das 09h00 da manhã
+            if (diffDays < 0 && horaAtual >= 9) {
+                if (contrato.ultimoAvisoAtrasoData !== hojeIso) {
+                    const diasAtraso = Math.abs(diffDays);
+                    console.log(`🚨 [Aviso Pagamento Atraso]: Enviando para ${contrato.clienteNome} (${motoObj.placa}) - ${diasAtraso}d de atraso...`);
+
+                    const pixData = await criarPixMercadoPago(`${motoObj.placa} - ${contrato.clienteNome}`, contrato.valor);
+
+                    const msgAtraso = `🚨 *AVISO DE ALUGUEL EM ATRASO — FACILITA MOTO* 🏍️💨\n\n` +
+                        `Olá, *${contrato.clienteNome}*!\n` +
+                        `Constatamos uma pendência no aluguel semanal da motocicleta *${motoObj.modelo} (Placa: ${motoObj.placa})*, vencida em *${formatarDataBr(contrato.dataProxVenc)}* (há ${diasAtraso} dia(s)).\n\n` +
+                        `💰 *Valor Semanal:* R$ ${contrato.valor.toFixed(2)}\n\n` +
+                        `⚠️ *Regularize agora para evitar ou liberar o bloqueio via satélite da sua moto!*\n\n` +
+                        `👇 *Copie o código PIX Copia e Cola do Mercado Pago abaixo para pagamento imediato:*`;
+
+                    await enviarMensagem(jidCli, msgAtraso);
+                    await new Promise(r => setTimeout(r, 600));
+                    await enviarMensagem(jidCli, pixData.pixCopiaECola);
+                    await new Promise(r => setTimeout(r, 800));
+                    await enviarMensagem(jidCli, `📱 *Assim que o pagamento for concluído, o sistema dá baixa imediata e a sua moto é desbloqueada via satélite!* 🔓🚀`);
+
+                    await fetch(`https://firestore.googleapis.com/v1/${contrato.docName}?updateMask.fieldPaths=ultimoAvisoAtrasoData&key=${FIRESTORE_API_KEY}`, {
+                        method: 'PATCH',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ fields: { ultimoAvisoAtrasoData: { stringValue: hojeIso } } })
+                    }).catch(() => {});
+
+                    if (pixData.paymentId) {
+                        monitorarPagamentoEDesbloquear(pixData.paymentId, motoObj.placa, jidCli, contrato.id, contrato.clienteNome, contrato.valor);
+                    }
+                }
+            }
+        }
+
+        // =================================================================
+        // 2. AVISOS DE REVISÃO E TROCA DE ÓLEO (CICLO DE 1.000 KM)
+        // =================================================================
+        if (horaAtual >= 9 && horaAtual <= 19) {
+            for (const moto of motos) {
+                const kmAtual = moto.kmAtual;
+                let kmProx = moto.kmProximaTroca;
+                if (!kmProx || kmProx <= 0) {
+                    kmProx = (moto.kmUltimaTroca || kmAtual) + 1000;
+                }
+                const kmRestantes = kmProx - kmAtual;
+
+                // Alerta preventivo se faltam até 150 km para os 1.000 km, ou se já venceu
+                if (kmRestantes <= 150) {
+                    if (moto.ultimoAvisoOleoData !== hojeIso) {
+                        const cMatch = contratos.find(c => c.motoPlaca === moto.placa || c.motoId === moto.id);
+                        let telCli = cMatch?.clienteTelefone;
+                        let nomeCli = cMatch?.clienteNome || 'Condutor';
+                        if (!telCli && cMatch?.clienteId) {
+                            const cliObj = clientes.find(x => x.id === cMatch.clienteId);
+                            if (cliObj) telCli = cliObj.telefone;
+                        }
+
+                        console.log(`🛢️ [Aviso Óleo 1000km]: Moto ${moto.placa} com ${kmAtual}km (Próxima: ${kmProx}km - Faltam ${kmRestantes}km)...`);
+
+                        const msgOleo = kmRestantes <= 0
+                            ? `🚨 *REVISÃO DE TROCA DE ÓLEO VENCIDA — FACILITA MOTO* 🏍️🔧\n\n` +
+                              `Olá, *${nomeCli}*!\n` +
+                              `A sua motocicleta *${moto.modelo} (Placa: ${moto.placa})* atingiu *${kmAtual} km* (troca prevista para ${kmProx} km).\n\n` +
+                              `⚠️ *Atenção:* O limite do ciclo de 1.000 km foi ultrapassado! Para proteger a vida útil do motor e manter sua garantia, compareça urgentemente em nossa *oficina parceira credenciada* para a troca preventiva de óleo.\n\n` +
+                              `Dúvidas ou agendamento? Digite *6* para falar com o atendimento.`
+                            : `🛢️ *AVISO DE REVISÃO: TROCA DE ÓLEO PRÓXIMA (1.000 KM) — FACILITA MOTO* 🏍️🔧\n\n` +
+                              `Olá, *${nomeCli}*!\n` +
+                              `Identificamos pelo rastreador que a sua motocicleta *${moto.modelo} (Placa: ${moto.placa})* está com *${kmAtual} km*.\n\n` +
+                              `📊 *KM Atual:* ${kmAtual} km\n` +
+                              `🎯 *KM Próxima Troca:* ${kmProx} km (faltam apenas *${kmRestantes} km*)\n\n` +
+                              `⚠️ *Lembrete:* As trocas de óleo devem ser feitas a cada 1.000 km exclusivamente em nossa oficina parceira credenciada para manter sua garantia.\n` +
+                              `Por favor, programe-se para passar na oficina nos próximos dias!\n\n` +
+                              `Digite *0* para menu ou *4* para informações de lojas e parceiros.`;
+
+                        if (telCli) {
+                            const jidCli = await getValidatedJid(telCli);
+                            if (jidCli) {
+                                await enviarMensagem(jidCli, msgOleo);
+                            }
+                        }
+
+                        // Alerta de controle de frota para o Henrique
+                        const alertaOleoHenrique = `🛢️📋 *ALERTA AUTOMÁTICO DE REVISÃO DE ÓLEO (1.000 KM)*\n` +
+                            `🏍️ *Moto:* ${moto.modelo} (${moto.placa})\n` +
+                            `👤 *Condutor:* ${nomeCli}\n` +
+                            `📱 *WhatsApp:* ${telCli || 'Não informado'}\n` +
+                            `📊 *KM Atual:* ${kmAtual} km\n` +
+                            `🎯 *KM Próxima Troca:* ${kmProx} km (${kmRestantes <= 0 ? 'VENCIDA há ' + Math.abs(kmRestantes) + ' km' : 'Faltam ' + kmRestantes + ' km'})\n\n` +
+                            `🤖 Notificação enviada de forma autônoma para o condutor via WhatsApp.`;
+                        await notificarHenrique(alertaOleoHenrique);
+
+                        await fetch(`https://firestore.googleapis.com/v1/${moto.docName}?updateMask.fieldPaths=ultimoAvisoOleoData&key=${FIRESTORE_API_KEY}`, {
+                            method: 'PATCH',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ fields: { ultimoAvisoOleoData: { stringValue: hojeIso } } })
+                        }).catch(() => {});
+                    }
+                }
+            }
+        }
+    } catch (e) {
+        console.warn('Erro ao executar rotina de avisos automáticos:', e.message);
+    } finally {
+        rotinaAvisosEmExecucao = false;
+    }
+}
+
+// Executa verificação periódica a cada 15 minutos de forma 100% autônoma
+setInterval(executarRotinaAvisosAutomaticos, 15 * 60 * 1000);
+
 // Inicia o motor Baileys
 startWhatsAppBot();
+
+// Endpoint para acionar manualmente ou testar a rotina autônoma
+app.all('/api/run-auto-warnings', async (req, res) => {
+    rotinaAvisosEmExecucao = false;
+    await executarRotinaAvisosAutomaticos();
+    res.json({ ok: true, message: 'Rotina de avisos automáticos executada com sucesso!' });
+});
 
 // Endpoint de Status JSON
 
