@@ -5,7 +5,81 @@ import QRCode from 'qrcode';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import makeWASocket, { DisconnectReason, useMultiFileAuthState, fetchLatestBaileysVersion } from '@whiskeysockets/baileys';
+import makeWASocket, { DisconnectReason, useMultiFileAuthState, fetchLatestBaileysVersion, downloadMediaMessage } from '@whiskeysockets/baileys';
+import { createRequire } from 'module';
+const require = createRequire(import.meta.url);
+const pdf = require('pdf-parse');
+const { createWorker } = require('tesseract.js');
+
+// =====================================================================
+// PROCESSADOR DE MÍDIA: LEITURA DE PDF (CNH DIGITAL) E OCR DE IMAGENS
+// =====================================================================
+async function extrairTextoDeMedia(msg) {
+    if (!msg || !msg.message) return '';
+    try {
+        const m = msg.message;
+        const docMsg = m.documentMessage || m.documentWithCaptionMessage?.message?.documentMessage;
+        const imgMsg = m.imageMessage || m.documentWithCaptionMessage?.message?.imageMessage;
+        const isPdf = docMsg?.mimetype === 'application/pdf';
+        const isImage = !!imgMsg;
+
+        if (!isPdf && !isImage) return '';
+
+        console.log(`📥 [Processando Mídia]: Baixando ${isPdf ? 'PDF' : 'Imagem'} para extração de dados...`);
+        const buffer = await downloadMediaMessage(
+            msg,
+            'buffer',
+            {},
+            {
+                logger: pino({ level: 'silent' }),
+                reuploadRequest: sock?.updateMediaMessage
+            }
+        );
+
+        if (!buffer || buffer.length === 0) return '';
+
+        if (isPdf) {
+            const data = await pdf(buffer);
+            const txt = (data.text || '').trim();
+            console.log(`📄 [PDF Processado]: ${txt.length} caracteres extraídos do PDF.`);
+            return txt;
+        }
+
+        if (isImage) {
+            return await Promise.race([
+                (async () => {
+                    const worker = await createWorker('por');
+                    const ret = await worker.recognize(buffer);
+                    await worker.terminate();
+                    const txt = (ret.data?.text || '').trim();
+                    console.log(`📸 [OCR Imagem Processado]: ${txt.length} caracteres extraídos da imagem.`);
+                    return txt;
+                })(),
+                new Promise(resolve => setTimeout(() => resolve(''), 10000))
+            ]);
+        }
+    } catch (e) {
+        console.warn('⚠️ [Media Parser Aviso]: Falha ao processar mídia:', e.message);
+    }
+    return '';
+}
+
+function extrairDadosCnh(textoDocumento) {
+    if (!textoDocumento) return {};
+    const cpfMatch = textoDocumento.match(/\b\d{3}\.?\d{3}\.?\d{3}\-?\d{2}\b/) || textoDocumento.match(/\b\d{11}\b/);
+    const cpf = cpfMatch ? cpfMatch[0].replace(/\D/g, '') : '';
+
+    const catMatch = textoDocumento.match(/CAT(?:EGORIA|\.?)?\s*[:=]?\s*([A-E]{1,2})\b/i) || textoDocumento.match(/\b(AB|A)\b/i);
+    const cnhCat = catMatch ? catMatch[1].toUpperCase() : 'A';
+
+    const regMatch = textoDocumento.match(/(?:REGISTRO|N[ºo\.]?\s*REGISTRO)\s*[:=]?\s*(\d{9,11})/i);
+    const cnh = regMatch ? regMatch[1] : '';
+
+    const nomeMatch = textoDocumento.match(/(?:NOME|CONDUTOR)\s*[:=]?\s*([A-ZÀ-Ú\s]{3,40}?)(?=\s+(?:CPF|RG|DOC|FILIA|DATA|\n|$))/i);
+    const nome = nomeMatch ? nomeMatch[1].trim() : '';
+
+    return { cpf, cnhCat, cnh, nome };
+}
 
 // =====================================================================
 
@@ -332,7 +406,7 @@ async function salvarLeadNoFirestore(leadData) {
                 cpf: { stringValue: cpfFinal },
                 rg: { stringValue: '' },
                 cnh: { stringValue: leadData.cnh || '' },
-                cnhCat: { stringValue: 'A' },
+                cnhCat: { stringValue: leadData.cnhCat || 'A' },
                 cnhValidade: { stringValue: '' },
                 endereco: { stringValue: enderecoFinal },
                 fotoCnh: { stringValue: '' },
@@ -998,28 +1072,30 @@ Locação de motos com quilometragem livre e suporte completo.
 *5* - 🚨 Informar Roubo ou Furto (Emergência 24h)
 *6* - 💬 Falar com Atendente Humano (10h às 18h - Seg a Sáb)`,
 
-    motos: `🏍️ *FACILITA MOTO — DISPONIBILIDADE E REQUISITOS*
+    motos: `🏍️ *FACILITA MOTO — DISPONIBILIDADE E REQUISITOS* 📋
 
 ⚠️ *Status da Frota:* No momento, *todas as nossas motos estão 100% LOCADAS!* 🛵💨
-Nossa procura é grande, mas abrimos vagas conforme devoluções e novas motos entram na frota.
+Nossa procura é grande, mas abrimos vagas prioritárias conforme devoluções e novas motos entram na frota.
 
 💰 *Valores para Retirada (R$ 700,00):*
 • *R$ 350,00 de Caução* (devolvida no encerramento do contrato)
-• *R$ 350,00 do Aluguel da 1ª Semana* (o valor semanal pode variar conforme o modelo disponível no painel adm)
+• *R$ 350,00 do Aluguel da 1ª Semana* (conforme o modelo disponível)
 • *Total de Entrada:* R$ 700,00 (caução + 1ª semana adiantada)
 • *Quilometragem Livre* para você rodar e lucrar!
 
 📋 *Requisitos Obrigatórios para Locação:*
 1. *CNH Categoria A* (válida)
-2. *Comprovante de Residência:* No seu próprio nome OU com firma autenticada em cartório (caso seja no nome de terceiros)
+2. *Comprovante de Residência:* No seu próprio nome OU com firma autenticada
 3. *1 Testemunha presente* no dia da assinatura do contrato
 4. Pagamento do valor de entrada (R$ 700,00) no ato da retirada
 
-👉 *Deseja entrar na nossa Fila de Espera prioritária?*
-Envie agora o seu *Nome Completo*, seu *Bairro* e a foto da sua *CNH* aqui nesta conversa!
-Assim que uma vaga liberar, nossa equipe entrará em contato com você com prioridade!
+━━━━━━━━━━━━━━━━━━━━
+📝 *FILA DE ESPERA PRIORITÁRIA (Etapa 1 de 4)*
 
-Digite *0* para voltar ao menu principal.`,
+Para garantir sua vaga com prioridade, vamos registrar seu cadastro passo a passo!
+
+👉 *1. Qual é o seu NOME COMPLETO?*
+*(Digite 0 a qualquer momento para voltar ao menu principal).*`,
 
     pedeIdentificacaoPix: `💳 *2ª VIA PIX SEMANAL — FACILITA MOTO*
 
@@ -1063,6 +1139,35 @@ No momento estamos fora do horário de expediente. Deixe sua mensagem ou dúvida
 
 *(Se for emergência de roubo ou furto, digite 5 para acionamento imediato 24h).*`
 };
+
+// =====================================================================
+// MONITOR DE INATIVIDADE (5 MINUTOS): FINALIZA ATENDIMENTO AUTOMATICAMENTE
+// =====================================================================
+setInterval(async () => {
+    if (!sock || !isConnected) return;
+    const agora = Date.now();
+    for (const [remoteJid, sessao] of clientSessions.entries()) {
+        const estaEmFluxoRobo = sessao.mode && sessao.mode !== 'MENU' && sessao.mode !== 'HUMAN_SUPPORT';
+        const inativoPor5Min = (agora - (sessao.lastActive || 0)) >= (5 * 60 * 1000);
+
+        if (estaEmFluxoRobo && inativoPor5Min && !sessao.timeoutNotificado) {
+            sessao.timeoutNotificado = true;
+            sessao.mode = 'MENU';
+            delete sessao.lead;
+            delete sessao.lojista;
+            delete sessao.veiculoPendente;
+            clientSessions.set(remoteJid, sessao);
+
+            const msgTimeout = `👋 *ATENDIMENTO FINALIZADO POR INATIVIDADE — FACILITA MOTO* 🏍️💨\n\n` +
+                `Agradecemos o seu contato! Como não tivemos retorno nos últimos 5 minutos, estamos encerrando este atendimento para manter a fila organizada.\n\n` +
+                `Caso queira falar conosco novamente, tirar dúvidas ou entrar na fila de espera, basta enviar um *"Oi"* ou qualquer mensagem! 😊\n\n` +
+                MENUS.principal;
+
+            await enviarMensagem(remoteJid, msgTimeout);
+            console.log(`⏱️ [Timeout 5min]: Atendimento finalizado por inatividade para ${remoteJid}`);
+        }
+    }
+}, 30000);
 
 let isSessionRestored = false;
 async function startWhatsAppBot() {
@@ -1452,91 +1557,196 @@ sock.ev.on('messages.upsert', async ({ messages, type }) => {
                     continue;
                 }
 
-                // 3.2. SE O CLIENTE ESTAVA ENVIANDO DADOS PARA A FILA DE ESPERA (NOVO LEAD)
-                if (sessao.mode === 'WAITING_LEAD_INFO') {
-                    if (texto === '0' || textoLower === 'menu' || textoLower === 'voltar') {
+                // 3.2. FLUXO MULTI-ETAPAS: FILA DE ESPERA / INTERESSE EM LOCAÇÃO (PASSO A PASSO)
+                if (sessao.mode === 'WAITING_LEAD_INFO' || sessao.mode === 'LEAD_STEP_NOME') {
+                    if (texto === '0' || textoLower === 'menu' || textoLower === 'voltar' || textoLower === 'cancelar') {
                         sessao.mode = 'MENU';
+                        delete sessao.lead;
                         clientSessions.set(remoteJid, sessao);
-                        await enviarMensagem(remoteJid, MENUS.principal);
+                        await enviarMenuComAntiSpam(remoteJid, MENUS.principal);
                         continue;
                     }
 
-                    sessao.mode = 'MENU';
+                    const nomeInformado = textoOriginal.trim();
+                    if (nomeInformado.length < 2) {
+                        await enviarMensagem(remoteJid, `⚠️ Por favor, digite o seu nome completo.\n*(Ou digite 0 para voltar ao menu principal)*.`);
+                        continue;
+                    }
+
+                    sessao.lead = sessao.lead || {};
+                    sessao.lead.nome = nomeInformado;
+                    sessao.mode = 'LEAD_STEP_TELEFONE';
+                    sessao.lastActive = Date.now();
+                    sessao.timeoutNotificado = false;
                     clientSessions.set(remoteJid, sessao);
 
+                    const msgEtapa2 = `Muito obrigado, *${nomeInformado}*! 👍\n\n` +
+                        `📝 *FILA DE ESPERA (Etapa 2 de 4)*\n\n` +
+                        `👉 *2. Qual é o seu NÚMERO DE TELEFONE / WHATSAPP com DDD?*\n` +
+                        `*(Por favor, digite com DDD, ex: 51 99999-8888)*\n\n` +
+                        `*(Digite 0 para voltar ao menu).*`;
+                    await enviarMensagem(remoteJid, msgEtapa2);
+                    continue;
+                }
+
+                if (sessao.mode === 'LEAD_STEP_TELEFONE') {
+                    if (texto === '0' || textoLower === 'menu' || textoLower === 'voltar') {
+                        sessao.mode = 'MENU';
+                        delete sessao.lead;
+                        clientSessions.set(remoteJid, sessao);
+                        await enviarMenuComAntiSpam(remoteJid, MENUS.principal);
+                        continue;
+                    }
+
+                    let digitos = texto.replace(/\D/g, '');
+                    if (digitos.startsWith('0')) digitos = digitos.substring(1);
+                    if (digitos.length === 10 || digitos.length === 11) {
+                        digitos = '55' + digitos;
+                    }
+
+                    if (digitos.length < 12 || digitos.length > 13) {
+                        await enviarMensagem(remoteJid, `⚠️ O número informado parece incompleto. Por favor, digite o seu número de WhatsApp com DDD (Exemplo: *51 99999-8888*):\n*(Ou digite 0 para voltar ao menu)*.`);
+                        continue;
+                    }
+
+                    sessao.lead = sessao.lead || {};
+                    sessao.lead.telefone = digitos;
+                    sessao.mode = 'LEAD_STEP_ENDERECO';
+                    sessao.lastActive = Date.now();
+                    sessao.timeoutNotificado = false;
+                    clientSessions.set(remoteJid, sessao);
+
+                    const telFmt = formatarParaWaMe(digitos);
+                    const msgEtapa3 = `Perfeito! Telefone registrado: *${telFmt}* 📱\n\n` +
+                        `📝 *FILA DE ESPERA (Etapa 3 de 4)*\n\n` +
+                        `👉 *3. Em qual BAIRRO e CIDADE você reside?*\n` +
+                        `*(Exemplo: Bairro Partenon, Porto Alegre)*\n\n` +
+                        `*(Digite 0 para voltar ao menu).*`;
+                    await enviarMensagem(remoteJid, msgEtapa3);
+                    continue;
+                }
+
+                if (sessao.mode === 'LEAD_STEP_ENDERECO') {
+                    if (texto === '0' || textoLower === 'menu' || textoLower === 'voltar') {
+                        sessao.mode = 'MENU';
+                        delete sessao.lead;
+                        clientSessions.set(remoteJid, sessao);
+                        await enviarMenuComAntiSpam(remoteJid, MENUS.principal);
+                        continue;
+                    }
+
+                    const enderecoInformado = textoOriginal.trim();
+                    if (enderecoInformado.length < 2) {
+                        await enviarMensagem(remoteJid, `⚠️ Por favor, informe o seu bairro e cidade.\n*(Ou digite 0 para voltar ao menu)*.`);
+                        continue;
+                    }
+
+                    sessao.lead = sessao.lead || {};
+                    sessao.lead.endereco = enderecoInformado;
+                    sessao.mode = 'LEAD_STEP_CNH';
+                    sessao.lastActive = Date.now();
+                    sessao.timeoutNotificado = false;
+                    clientSessions.set(remoteJid, sessao);
+
+                    const msgEtapa4 = `Ótimo! Endereço registrado: *${enderecoInformado}* 📍\n\n` +
+                        `📝 *FILA DE ESPERA (Etapa 4 de 4 — Final)*\n\n` +
+                        `👉 *4. Por favor, envie o arquivo PDF da sua CNH Digital ou uma FOTO legível da sua CNH:*\n` +
+                        `*(Nosso sistema lerá automaticamente o documento para cadastrar você com prioridade).* 📄📸\n\n` +
+                        `💡 _Caso não tenha o arquivo agora, você também pode apenas digitar o seu CPF e número de registro da CNH._\n` +
+                        `*(Digite 0 para voltar ao menu).*`;
+                    await enviarMensagem(remoteJid, msgEtapa4);
+                    continue;
+                }
+
+                if (sessao.mode === 'LEAD_STEP_CNH') {
+                    if (texto === '0' || textoLower === 'menu' || textoLower === 'voltar') {
+                        sessao.mode = 'MENU';
+                        delete sessao.lead;
+                        clientSessions.set(remoteJid, sessao);
+                        await enviarMenuComAntiSpam(remoteJid, MENUS.principal);
+                        continue;
+                    }
+
+                    sessao.lead = sessao.lead || {};
+                    await enviarMensagem(remoteJid, `⏳ *Processando e validando seus dados... Só um instante!*`);
+
+                    // 1. Tenta extrair texto de PDF ou Imagem
+                    let textoExtraidoDoc = '';
+                    try {
+                        textoExtraidoDoc = await extrairTextoDeMedia(msg);
+                    } catch (eDoc) {
+                        console.warn('Erro ao processar mídia de CNH:', eDoc.message);
+                    }
+
+                    const textoGeral = (textoExtraidoDoc + ' ' + (textoOriginal || '')).trim();
+                    const dadosCnh = extrairDadosCnh(textoGeral);
+
+                    const cpfFinal = dadosCnh.cpf || (textoGeral.match(/\b\d{3}\.?\d{3}\.?\d{3}\-?\d{2}\b/) || textoGeral.match(/\b\d{11}\b/) || [''])[0].replace(/\D/g, '');
+                    const cnhFinal = dadosCnh.cnh || '';
+                    const cnhCatFinal = dadosCnh.cnhCat || 'A';
+                    const nomeFinal = sessao.lead.nome || dadosCnh.nome || pushName || 'Lead WhatsApp';
+                    const telFinal = sessao.lead.telefone || senderNumber;
+                    const enderecoFinal = sessao.lead.endereco || '';
                     const horaSP = getSaoPauloDate().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
-                    const phoneWaMe = formatarParaWaMe(senderNumber);
 
-                    // Extração inteligente de dados fornecidos pelo usuário
-                    const textoBruto = textoOriginal || '';
-                    const cpfMatch = textoBruto.match(/\b\d{3}\.?\d{3}\.?\d{3}\-?\d{2}\b/) || textoBruto.match(/\b\d{11}\b/);
-                    const cpfExtraido = cpfMatch ? cpfMatch[0].replace(/\D/g, '') : '';
-
-                    let nomeExtraido = pushName || 'Lead WhatsApp';
-                    if (textoBruto) {
-                        const linhas = textoBruto.split('\n').map(l => l.trim()).filter(Boolean);
-                        const linhaNome = linhas.find(l => /^nome\s*[:=]\s*/i.test(l));
-                        if (linhaNome) {
-                            nomeExtraido = linhaNome.replace(/^nome\s*[:=]\s*/i, '').trim();
-                        } else if (linhas.length > 0 && linhas[0].length >= 3 && !/^\d+$/.test(linhas[0]) && !linhas[0].includes('http')) {
-                            const partes = linhas[0].split(' ');
-                            if (partes.length >= 2 && partes.length <= 6 && !linhas[0].includes('@') && !linhas[0].includes('/')) {
-                                nomeExtraido = linhas[0];
-                            }
-                        }
-                    }
-                    if ((!nomeExtraido || nomeExtraido === 'Lead WhatsApp') && pushName && pushName !== 'Cliente') {
-                        nomeExtraido = pushName;
-                    }
-
-                    let enderecoExtraido = '';
-                    const matchBairro = textoBruto.match(/(?:bairro|rua|av|avenida|moro no|moro na|resido em|endereço|endereco)\s*[:=]?\s*([^\n,]+)/i);
-                    if (matchBairro && matchBairro[0]) {
-                        enderecoExtraido = matchBairro[0].trim();
-                    }
-
-                    // Salva no Firestore crm_clientes (onde ficam todos os leads do Facilita Moto, junto com os do site)
+                    // 2. Salva no Firestore crm_clientes (onde ficam todos os leads do Facilita Moto, junto com os do site)
                     const resLeadSalvo = await salvarLeadNoFirestore({
-                        nome: nomeExtraido,
-                        telefone: phoneWaMe,
-                        cpf: cpfExtraido,
-                        endereco: enderecoExtraido,
-                        dados: textoOriginal || '[Foto ou documento CNH enviado]'
+                        nome: nomeFinal,
+                        telefone: telFinal,
+                        cpf: cpfFinal,
+                        cnh: cnhFinal,
+                        cnhCat: cnhCatFinal,
+                        endereco: enderecoFinal,
+                        dados: `Nome: ${nomeFinal} | Tel: ${telFinal} | Bairro: ${enderecoFinal} | CPF: ${cpfFinal || 'Não informado'} | CNH: ${cnhFinal || (textoExtraidoDoc ? 'Lida via Documento Digital' : 'Enviada foto/doc')}`
                     });
 
                     const novoLead = {
                         id: resLeadSalvo?.id || `LEAD-${Date.now()}`,
-                        nome: nomeExtraido,
-                        telefone: phoneWaMe,
-                        cpf: cpfExtraido,
-                        endereco: enderecoExtraido,
-                        dados: textoOriginal || 'Enviou documento/foto',
+                        nome: nomeFinal,
+                        telefone: telFinal,
+                        cpf: cpfFinal,
+                        cnh: cnhFinal,
+                        endereco: enderecoFinal,
+                        dados: `Bairro: ${enderecoFinal} | CPF: ${cpfFinal || 'S/N'}`,
                         hora: horaSP,
                         timestamp: Date.now()
                     };
                     leadsFilaDeEspera.unshift(novoLead);
                     if (leadsFilaDeEspera.length > 50) leadsFilaDeEspera.pop();
 
-                    const respCliente = `✅ *CADASTRO REALIZADO COM SUCESSO!* 🏍️📋\n\n` +
-                        `Muito obrigado, *${nomeExtraido}*! Seus dados foram cadastrados com sucesso em nossa *Fila de Espera prioritária* no sistema da Facilita Moto.\n\n` +
-                        `📱 *Telefone registrado:* ${phoneWaMe}\n` +
-                        `${cpfExtraido ? `🪪 *CPF:* ${cpfExtraido}\n` : ''}` +
-                        `${enderecoExtraido ? `📍 *Bairro/Endereço:* ${enderecoExtraido}\n` : ''}\n` +
-                        `Assim que uma moto for liberada para locação, entraremos em contato direto com você por aqui!\n\n` +
+                    sessao.mode = 'MENU';
+                    delete sessao.lead;
+                    clientSessions.set(remoteJid, sessao);
+
+                    const telFormatado = formatarParaWaMe(telFinal);
+                    const msgDocLido = textoExtraidoDoc ? `📄 *Documento digital processado e validado com sucesso!*\n` : '';
+
+                    const respCliente = `🎉 *CADASTRO CONCLUÍDO COM SUCESSO!* 🏍️✨\n\n` +
+                        msgDocLido +
+                        `Muito obrigado, *${nomeFinal}*! Seus dados foram registrados com sucesso no sistema da *Facilita Moto* em nossa *Fila de Espera prioritária*!\n\n` +
+                        `📋 *Resumo do Cadastro:*\n` +
+                        `• 👤 *Nome:* ${nomeFinal}\n` +
+                        `• 📱 *Telefone de Contato:* ${telFormatado}\n` +
+                        `• 📍 *Localização:* ${enderecoFinal}\n` +
+                        `${cpfFinal ? `• 🪪 *CPF:* ${cpfFinal}\n` : ''}` +
+                        `${cnhFinal ? `• 📋 *Registro CNH:* ${cnhFinal} (Cat. ${cnhCatFinal})\n` : ''}` +
+                        `\nAssim que uma moto estiver pronta para retirada, nossa equipe entrará em contato direto com você por este WhatsApp!\n\n` +
                         `*(Requisitos para retirada: R$ 700,00 de entrada [caução + 1ª semana], CNH A, comprovante de residência e 1 testemunha no contrato).* \n\n` +
                         `Digite *0* para voltar ao menu principal.`;
                     await enviarMensagem(remoteJid, respCliente);
 
-                    // Notifica o Henrique no WhatsApp com prioridade máxima
-                    const alertaLead = `🔥 *NOVO LEAD REGISTRADO NO CRM — FACILITA MOTO* 🔥\n\n` +
-                        `👤 *Nome:* ${nomeExtraido}\n` +
-                        `📱 *WhatsApp:* ${phoneWaMe}\n` +
-                        `${cpfExtraido ? `🪪 *CPF:* ${cpfExtraido}\n` : ''}` +
-                        `${enderecoExtraido ? `📍 *Endereço/Bairro:* ${enderecoExtraido}\n` : ''}` +
+                    // Notifica Henrique com prioridade máxima e link wa.me direto para o telefone correto
+                    const numWaLink = telFinal.startsWith('55') ? telFinal : '55' + telFinal;
+                    const alertaLead = `🔥 *NOVO LEAD COMPLETO NO CRM — FACILITA MOTO* 🔥\n\n` +
+                        `👤 *Nome:* ${nomeFinal}\n` +
+                        `📱 *WhatsApp Correto:* ${telFormatado}\n` +
+                        `📍 *Bairro/Cidade:* ${enderecoFinal}\n` +
+                        `${cpfFinal ? `🪪 *CPF:* ${cpfFinal}\n` : ''}` +
+                        `${cnhFinal ? `📋 *CNH:* ${cnhFinal} (${cnhCatFinal})\n` : ''}` +
                         `⏰ *Horário:* ${horaSP}\n` +
-                        `💬 *Dados informados:*\n"${textoOriginal || '[Foto ou documento enviado]'}"\n\n` +
-                        `✅ *Armazenado com sucesso no CRM (crm_clientes) em "Novo Lead"!*\n\n` +
-                        `👉 *CLIQUE AQUI PARA FALAR COM O LEAD AGORA:*\nhttps://wa.me/${phoneWaMe}`;
+                        `💬 *Status do Documento:* ${textoExtraidoDoc ? 'CNH Digital / Imagem lida automaticamente!' : 'Dados digitados pelo cliente'}\n\n` +
+                        `✅ *Armazenado com sucesso no CRM (crm_clientes) na aba "Leads Recentes"!*\n\n` +
+                        `👉 *CLIQUE AQUI PARA FALAR COM O LEAD AGORA:*\nhttps://wa.me/${numWaLink}`;
                     await notificarHenrique(alertaLead);
                     continue;
                 }
@@ -1736,9 +1946,12 @@ sock.ev.on('messages.upsert', async ({ messages, type }) => {
                 // Opção 6: Falar com Atendente Humano
                 const ehOpcaoHumano = !ehOpcaoRoubo && !ehOpcaoLojista && (texto === '6' || digitosTexto === '6' || textoLower.includes('opcao 6') || textoLower.includes('opção 6') || textoLower.includes('atendente') || textoLower.includes('humano') || textoLower.includes('suporte') || textoLower.includes('falar'));
 
-                // Opção 1: Motos Disponíveis
+                // Opção 1: Motos Disponíveis (Inicia Cadastro Passo a Passo)
                 if (ehOpcao1) {
-                    sessao.mode = 'WAITING_LEAD_INFO';
+                    sessao.mode = 'LEAD_STEP_NOME';
+                    sessao.lead = {};
+                    sessao.lastActive = Date.now();
+                    sessao.timeoutNotificado = false;
                     clientSessions.set(remoteJid, sessao);
                     await enviarMensagem(remoteJid, MENUS.motos);
                     continue;
