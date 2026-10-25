@@ -210,6 +210,7 @@ const FIRESTORE_AUTH_URL = `https://firestore.googleapis.com/v1/projects/${FIRES
 
 
 const FIRESTORE_EMERGENCIAS_URL = "https://firestore.googleapis.com/v1/projects/" + FIRESTORE_PROJECT_ID + "/databases/(default)/documents/alertas_emergencia";
+const FIRESTORE_LOJISTAS_URL = "https://firestore.googleapis.com/v1/projects/" + FIRESTORE_PROJECT_ID + "/databases/(default)/documents/propostas_lojistas";
 
 async function salvarEmergenciaNoFirestore(alertObj) {
     try {
@@ -232,6 +233,32 @@ async function salvarEmergenciaNoFirestore(alertObj) {
         console.log("🚨 [Firestore] Alerta de emergência salvo na nuvem com status " + res.status + ": " + docId);
     } catch (e) {
         console.warn('Erro ao salvar emergência no Firestore:', e.message);
+    }
+}
+
+async function salvarPropostaLojistaNoFirestore(lojistaObj) {
+    try {
+        const docId = lojistaObj.id || ("LOJISTA-" + Date.now());
+        const res = await fetch(FIRESTORE_LOJISTAS_URL + "/" + docId + "?key=" + FIRESTORE_API_KEY, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                fields: {
+                    id: { stringValue: docId },
+                    clienteNome: { stringValue: lojistaObj.clienteNome || '' },
+                    clienteTelefone: { stringValue: lojistaObj.clienteTelefone || '' },
+                    lojaEGerente: { stringValue: lojistaObj.lojaEGerente || '' },
+                    endereco: { stringValue: lojistaObj.endereco || '' },
+                    proposta: { stringValue: lojistaObj.proposta || '' },
+                    hora: { stringValue: lojistaObj.hora || '' },
+                    timestamp: { integerValue: String(lojistaObj.timestamp || Date.now()) },
+                    status: { stringValue: 'NOVA' }
+                }
+            })
+        });
+        console.log("🏪 [Firestore] Proposta de lojista salva na nuvem com status " + res.status + ": " + docId);
+    } catch (e) {
+        console.warn('Erro ao salvar proposta de lojista no Firestore:', e.message);
     }
 }
 
@@ -672,18 +699,21 @@ async function enviarMensagem(targetJid, texto) {
     }
 }
 
-// Menus Sequenciais 1 a 5 com Requisitos e Valores Atualizados
+// Menus Sequenciais 1 a 6 com Requisitos e Valores Atualizados
 const MENUS = {
     principal: `👋 Olá! Seja muito bem-vindo(a) à *Facilita Moto*! 🏍️💨
 Locação de motos com quilometragem livre e suporte completo.
+
+🌐 *Conheça nosso site oficial:* www.agilizamoto.com.br
 
 *Digite o NÚMERO da opção desejada:*
 
 *1* - 🏍️ Motos Disponíveis (Fila de Espera e Requisitos)
 *2* - 💳 2ª Via do PIX Semanal (Gerar código na hora)
 *3* - 🔓 Solicitar Desbloqueio da Moto (Todas as motos da frota)
-*4* - 🚨 Informar Roubo ou Furto (Emergência 24h)
-*5* - 💬 Falar com Atendente Humano (10h às 18h - Seg a Sáb)`,
+*4* - 🏪 Sou Lojista (Parcerias para Lojas e Oficinas)
+*5* - 🚨 Informar Roubo ou Furto (Emergência 24h)
+*6* - 💬 Falar com Atendente Humano (10h às 18h - Seg a Sáb)`,
 
     motos: `🏍️ *FACILITA MOTO — DISPONIBILIDADE E REQUISITOS*
 
@@ -717,7 +747,7 @@ Por favor, envie aqui o seu *Nome Completo*, *CPF* ou a *Placa da moto*:
 
 A troca de óleo agora é realizada e autorizada *exclusivamente pela nossa oficina mecânica parceira credenciada* ou pelo painel administrativo da Facilita Moto!
 
-Para tirar dúvidas sobre a sua revisão de 1.000 km, digite *5* para falar com o atendente.
+Para tirar dúvidas sobre a sua revisão de 1.000 km, digite *6* para falar com o atendente.
 Digite *0* para voltar ao menu principal.`,
 
     desbloqueio: `🔓 *SOLICITAÇÃO DE DESBLOQUEIO DE MOTO*
@@ -726,7 +756,7 @@ O desbloqueio automático via satélite Xtrack ocorre em até 5 minutos após a 
 
 Se você já realizou o pagamento e ainda não desbloqueou:
 1. Envie o comprovante do PIX aqui nesta conversa.
-2. Digite *5* para falar com o atendente e liberar imediatamente.
+2. Digite *6* para falar com o atendente e liberar imediatamente.
 Digite *0* para voltar ao menu principal.`,
 
     emergenciaRoubo: `🚨🚨 *CANAL DE EMERGÊNCIA — ROUBO OU FURTO* 🚨🚨
@@ -748,7 +778,7 @@ Nosso horário de atendimento é:
 
 No momento estamos fora do horário de expediente. Deixe sua mensagem ou dúvida aqui, e responderemos assim que abrirmos às 10h00!
 
-*(Se for emergência de roubo ou furto, digite 4 para acionamento imediato 24h).*`
+*(Se for emergência de roubo ou furto, digite 5 para acionamento imediato 24h).*`
 };
 
 let isSessionRestored = false;
@@ -1037,11 +1067,11 @@ sock.ev.on('messages.upsert', async ({ messages, type }) => {
                     }
                 }
 
-                // PRIORIDADE MÁXIMA: Se o cliente digitou qualquer opção numérica (1 a 5), saudação ou palavra-chave, SAI IMEDIATAMENTE do HUMAN_SUPPORT e atende na hora!
+                // PRIORIDADE MÁXIMA: Se o cliente digitou qualquer opção numérica (1 a 6), saudação ou palavra-chave, SAI IMEDIATAMENTE do HUMAN_SUPPORT e atende na hora!
                 const digitosEntrada = texto.replace(/\D/g, '');
                 const querOpcaoOuMenu = ['0', '1', '2', '3', '4', '5', '6'].includes(texto) ||
                                        ['0', '1', '2', '3', '4', '5', '6'].includes(digitosEntrada) ||
-                                       ['menu', 'sair', 'voltar', 'inicio', 'início', 'opcoes', 'opções', 'oi', 'ola', 'olá', 'bom dia', 'boa tarde', 'boa noite', 'ajuda', 'quero', 'aluguel', 'motos', 'moto'].includes(textoLower) ||
+                                       ['menu', 'sair', 'voltar', 'inicio', 'início', 'opcoes', 'opções', 'oi', 'ola', 'olá', 'bom dia', 'boa tarde', 'boa noite', 'ajuda', 'quero', 'aluguel', 'motos', 'moto', 'lojista', 'loja', 'parceiro', 'parceria', 'sou lojista'].includes(textoLower) ||
                                        textoLower.includes('opcao') || textoLower.includes('opção') ||
                                        textoLower.includes('roubo') || textoLower.includes('furto') || textoLower.includes('socorro') || textoLower.includes('emergencia') || textoLower.includes('emergência');
 
@@ -1222,6 +1252,112 @@ Digite *0* para voltar ao menu principal.`);
                     continue;
                 }
 
+                // -------------------------------------------------------------
+                // 3.35. FLUXO MULTI-ETAPAS: SOU LOJISTA (PARCERIAS)
+                // -------------------------------------------------------------
+                if (sessao.mode === 'LOJISTA_STEP_GERENTE') {
+                    if (texto === '0' || textoLower === 'menu' || textoLower === 'voltar') {
+                        sessao.mode = 'MENU';
+                        clientSessions.set(remoteJid, sessao);
+                        await enviarMensagem(remoteJid, MENUS.principal);
+                        continue;
+                    }
+
+                    sessao.lojista = sessao.lojista || {};
+                    sessao.lojista.gerenteELoja = textoOriginal;
+                    sessao.mode = 'LOJISTA_STEP_ENDERECO';
+                    clientSessions.set(remoteJid, sessao);
+
+                    const msgEndereco = `📍 *ENDEREÇO DA SUA LOJA*\n\nExcelente! Agora, por favor envie o *endereço completo* da sua loja:\n• Rua e Número\n• *Bairro*\n• *CEP* e Cidade\n\n*(Digite 0 para voltar ao menu).*`;
+                    await enviarMensagem(remoteJid, msgEndereco);
+                    continue;
+                }
+
+                if (sessao.mode === 'LOJISTA_STEP_ENDERECO') {
+                    if (texto === '0' || textoLower === 'menu' || textoLower === 'voltar') {
+                        sessao.mode = 'MENU';
+                        clientSessions.set(remoteJid, sessao);
+                        await enviarMensagem(remoteJid, MENUS.principal);
+                        continue;
+                    }
+
+                    sessao.lojista = sessao.lojista || {};
+                    sessao.lojista.endereco = textoOriginal;
+                    sessao.mode = 'LOJISTA_STEP_PROPOSTA';
+                    clientSessions.set(remoteJid, sessao);
+
+                    const msgProposta = `📝 *PROPOSTA DE PARCERIA & CONDIÇÕES ESPECIAIS*\n\nExcelente! Por favor, envie agora a sua *proposta de parceria comercial*:\n\n• Descreva quais serviços ou peças sua loja oferece.\n• Quais as *condições e descontos especiais* para a frota da *Facilita Moto* (ex: desconto em peças, agilidade em revisões, troca de óleo, pneus)?\n\n*(Digite 0 para voltar ao menu).*`;
+                    await enviarMensagem(remoteJid, msgProposta);
+                    continue;
+                }
+
+                if (sessao.mode === 'LOJISTA_STEP_PROPOSTA') {
+                    if (texto === '0' || textoLower === 'menu' || textoLower === 'voltar') {
+                        sessao.mode = 'MENU';
+                        clientSessions.set(remoteJid, sessao);
+                        await enviarMensagem(remoteJid, MENUS.principal);
+                        continue;
+                    }
+
+                    sessao.lojista = sessao.lojista || {};
+                    sessao.lojista.proposta = textoOriginal;
+                    sessao.mode = 'LOJISTA_STEP_FINAL';
+                    clientSessions.set(remoteJid, sessao);
+
+                    const horaSP = getSaoPauloDate().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+                    const phoneWaMe = formatarParaWaMe(senderNumber);
+
+                    // Salva a proposta no Firestore
+                    salvarPropostaLojistaNoFirestore({
+                        clienteNome: pushName,
+                        clienteTelefone: phoneWaMe,
+                        lojaEGerente: sessao.lojista.gerenteELoja,
+                        endereco: sessao.lojista.endereco,
+                        proposta: sessao.lojista.proposta,
+                        hora: horaSP,
+                        timestamp: Date.now()
+                    }).catch(() => {});
+
+                    // Notifica o Henrique com prioridade máxima no WhatsApp pessoal (igual furto)
+                    const alertaLojistaHenrique = `🏪🤝 *NOVA PROPOSTA DE LOJISTA / OFICINA PARCEIRA!* 🤝🏍️\n👤 *Contato:* ${pushName}\n📱 *WhatsApp:* ${phoneWaMe}\n⏰ *Horário:* ${horaSP}\n\n🏢 *Loja & Gerente:*\n${sessao.lojista.gerenteELoja}\n\n📍 *Endereço Completo, Bairro e CEP:*\n${sessao.lojista.endereco}\n\n📝 *Proposta de Parceria & Condições Especiais:*\n"${sessao.lojista.proposta}"\n\n👉 *Conversa Direta com o Lojista:*\nhttps://wa.me/${phoneWaMe}`;
+                    await notificarHenrique(alertaLojistaHenrique);
+
+                    // Pergunta ao lojista se deseja falar com o atendimento agora
+                    const msgConclusaoLojista = `✅ *PROPOSTA ENVIADA COM SUCESSO!* 🤝🎉\n\nMuito obrigado, *${pushName}*! Recebemos sua proposta de parceria com a *Facilita Moto*.\nNossa diretoria já recebeu todos os detalhes para avaliação.\n\nDeseja falar com o nosso atendimento agora mesmo?\n\n*1* - 💬 *Falar com o atendimento agora*\n*0* - 🏁 *Concluir e voltar ao menu principal*`;
+                    await enviarMensagem(remoteJid, msgConclusaoLojista);
+                    continue;
+                }
+
+                if (sessao.mode === 'LOJISTA_STEP_FINAL') {
+                    const querEncerrar = texto === '0' || textoLower === 'sair' || textoLower === 'menu' || textoLower === 'voltar' || textoLower === 'concluir' || textoLower === 'nao' || textoLower === 'não';
+
+                    if (!querEncerrar) {
+                        // Conecta imediatamente ao suporte humano (sem restrição de horário comercial, igual furto)
+                        sessao.mode = 'HUMAN_SUPPORT';
+                        clientSessions.set(remoteJid, sessao);
+
+                        const horaSP = getSaoPauloDate().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+                        const phoneWaMe = formatarParaWaMe(senderNumber);
+
+                        salvarSuporteAtivo(remoteJid, phoneWaMe, `${pushName} (Lojista)`);
+
+                        const msgLojistaConectado = `🧑‍💼 *ATENDIMENTO CONECTADO!* 🤝\n\nVocê está conectado diretamente com o Henrique da Facilita Moto.\nPode enviar sua mensagem por aqui que responderemos em instantes!\n\n*(Para encerrar a conversa a qualquer momento, digite "sair" ou "0").*`;
+                        await enviarMensagem(remoteJid, msgLojistaConectado);
+
+                        // Se digitou algo além de '1', repassa a mensagem já dita para o Henrique
+                        const mensagemAdicional = (texto === '1' || digitosTexto === '1') ? 'Lojista solicitou atendimento imediato após enviar proposta.' : textoOriginal;
+
+                        const alertaAtendimentoLojista = `🏪🚨 *ATENDIMENTO DE LOJISTA ACIONADO!* 🚨\n👤 *Lojista:* ${pushName}\n📱 *WhatsApp:* ${phoneWaMe}\n🏢 *Loja:* ${sessao.lojista?.gerenteELoja || 'Loja Parceira'}\n⏰ *Horário:* ${horaSP}\n💬 *Mensagem:* "${mensagemAdicional}"\n\n🟢 *A PONTE ESTÁ ATIVADA!* Basta responder esta mensagem aqui no seu WhatsApp para falar direto com o lojista pelo WhatsApp da Facilita!\n\n👉 Ou abra direto: https://wa.me/${phoneWaMe}\n*(Para encerrar depois, basta digitar #sair).*`;
+                        await notificarHenrique(alertaAtendimentoLojista);
+                        continue;
+                    } else {
+                        sessao.mode = 'MENU';
+                        clientSessions.set(remoteJid, sessao);
+                        await enviarMensagem(remoteJid, `🤝 Muito obrigado pela parceria! Entraremos em contato em breve.\n\n` + MENUS.principal);
+                        continue;
+                    }
+                }
+
                 // =============================================================
                 // 3.4. CHATBOT URA SEQUENCIAL 1 A 6
                 // =============================================================
@@ -1233,7 +1369,15 @@ Digite *0* para voltar ao menu principal.`);
                 const ehOpcao1 = texto === '1' || digitosTexto === '1' || textoLower.includes('opcao 1') || textoLower.includes('opção 1') || textoLower.includes('motos') || textoLower.includes('disponivel') || textoLower.includes('aluguel') || textoLower.includes('requisito');
                 const ehOpcao2 = texto === '2' || digitosTexto === '2' || textoLower.includes('opcao 2') || textoLower.includes('opção 2') || textoLower === 'pix' || textoLower.includes('segunda via') || textoLower.includes('2a via') || textoLower.includes('fatura') || textoLower.includes('pagamento');
                 const ehOpcao3 = texto === '3' || digitosTexto === '3' || textoLower.includes('opcao 3') || textoLower.includes('opção 3') || textoLower.includes('desbloqueio') || textoLower.includes('desbloquear');
-                const ehOpcao4 = texto === '4' || digitosTexto === '4' || textoLower.includes('opcao 4') || textoLower.includes('opção 4') || textoLower.includes('roubo') || textoLower.includes('furto') || textoLower.includes('emergencia') || textoLower.includes('emergência') || textoLower.includes('socorro') || textoLower.includes('assalto');
+                
+                // Opção 5: Roubo ou Furto (Prioridade total para segurança)
+                const ehOpcaoRoubo = texto === '5' || digitosTexto === '5' || textoLower.includes('opcao 5') || textoLower.includes('opção 5') || textoLower.includes('roubo') || textoLower.includes('furto') || textoLower.includes('emergencia') || textoLower.includes('emergência') || textoLower.includes('socorro') || textoLower.includes('assalto');
+
+                // Opção 4: Sou Lojista (Parceria para lojas e oficinas)
+                const ehOpcaoLojista = !ehOpcaoRoubo && (texto === '4' || digitosTexto === '4' || textoLower.includes('opcao 4') || textoLower.includes('opção 4') || textoLower.includes('lojista') || textoLower.includes('sou lojista') || textoLower.includes('parceir') || textoLower.includes('parceria'));
+
+                // Opção 6: Falar com Atendente Humano
+                const ehOpcaoHumano = !ehOpcaoRoubo && !ehOpcaoLojista && (texto === '6' || digitosTexto === '6' || textoLower.includes('opcao 6') || textoLower.includes('opção 6') || textoLower.includes('atendente') || textoLower.includes('humano') || textoLower.includes('suporte') || textoLower.includes('falar'));
 
                 // Opção 1: Motos Disponíveis
                 if (ehOpcao1) {
@@ -1270,8 +1414,24 @@ Digite *0* para voltar ao menu principal.`);
                     continue;
                 }
 
-                // Opção 4: ROUBO OU FURTO (EMERGÊNCIA 24H)
-                if (ehOpcao4) {
+                // Opção 4: SOU LOJISTA (Parcerias para Lojas e Oficinas)
+                if (ehOpcaoLojista) {
+                    sessao.mode = 'LOJISTA_STEP_GERENTE';
+                    sessao.lojista = {};
+                    clientSessions.set(remoteJid, sessao);
+
+                    const msgLojista = `🏪 *SEJA UMA LOJA OU OFICINA PARCEIRA — FACILITA MOTO* 🤝🏍️\n\n` +
+                        `Buscamos parcerias com oficinas mecânicas, motopeças e lojas para atendimento, peças e manutenção da nossa frota!\n\n` +
+                        `👉 *Para iniciarmos, por favor digite:*\n` +
+                        `• *Nome da sua Loja/Oficina*\n` +
+                        `• *Nome do Gerente ou Responsável*\n\n` +
+                        `*(Digite 0 para voltar ao menu).*`;
+                    await enviarMensagem(remoteJid, msgLojista);
+                    continue;
+                }
+
+                // Opção 5: ROUBO OU FURTO (EMERGÊNCIA 24H)
+                if (ehOpcaoRoubo) {
                     // Responde o cliente com instruções de segurança imediatas
                     await enviarMensagem(remoteJid, MENUS.emergenciaRoubo);
 
@@ -1305,7 +1465,7 @@ Digite *0* para voltar ao menu principal.`);
 👤 *Condutor:* ${pushName}
 📱 *WhatsApp:* ${phoneWaMe}
 ⏰ *Hora:* ${horaSP}
-💬 *Mensagem dele:* "${textoOriginal || 'Opção 4 - Roubo/Furto'}"
+💬 *Mensagem dele:* "${textoOriginal || 'Opção 5 - Roubo/Furto'}"
 
 🟢 *A PONTE ESTÁ ATIVADA!*
 Basta responder esta mensagem aqui no seu WhatsApp!
@@ -1318,9 +1478,8 @@ Qualquer mensagem que você digitar agora será entregue ao condutor pelo WhatsA
                     continue;
                 }
 
-                // Opção 5 (ou 6): Falar com Atendente Humano (10h às 18h - Seg a Sáb)
-                const ehOpcao5 = texto === '5' || texto === '6' || digitosTexto === '5' || digitosTexto === '6' || textoLower.includes('opcao 5') || textoLower.includes('opção 5') || textoLower.includes('atendente') || textoLower.includes('falar') || textoLower.includes('humano') || textoLower.includes('suporte');
-                if (ehOpcao5) {
+                // Opção 6: Falar com Atendente Humano (10h às 18h - Seg a Sáb)
+                if (ehOpcaoHumano) {
                     const aberto = isAtendimentoHumanoDisponivel();
 
                     if (!aberto) {
@@ -1356,7 +1515,7 @@ Pode ir digitando sua mensagem ou dúvida enquanto isso. 👇
 👤 *Cliente:* ${pushName}
 📱 *WhatsApp:* ${phoneWaMe}
 ⏰ *Horário:* ${horaSP}
-💬 *Mensagem dele:* "${textoOriginal || 'Opção 5 - Falar com Atendente'}"
+💬 *Mensagem dele:* "${textoOriginal || 'Opção 6 - Falar com Atendente'}"
 
 🟢 *A PONTE ESTÁ ATIVADA!*
 Basta responder esta mensagem aqui no seu WhatsApp!
