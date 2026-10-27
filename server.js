@@ -1088,6 +1088,7 @@ Nossa procura é grande, mas abrimos vagas prioritárias conforme devoluções e
 2. *Comprovante de Residência:* No seu próprio nome OU com firma autenticada
 3. *1 Testemunha presente* no dia da assinatura do contrato
 4. Pagamento do valor de entrada (R$ 700,00) no ato da retirada
+5. *Permanência mínima de 3 meses* (com fidelidade contratual e quitação dos meses faltantes em caso de quebra)
 
 ━━━━━━━━━━━━━━━━━━━━
 📝 *FILA DE ESPERA PRIORITÁRIA (Etapa 1 de 4)*
@@ -1731,7 +1732,7 @@ sock.ev.on('messages.upsert', async ({ messages, type }) => {
                         `${cpfFinal ? `• 🪪 *CPF:* ${cpfFinal}\n` : ''}` +
                         `${cnhFinal ? `• 📋 *Registro CNH:* ${cnhFinal} (Cat. ${cnhCatFinal})\n` : ''}` +
                         `\nAssim que uma moto estiver pronta para retirada, nossa equipe entrará em contato direto com você por este WhatsApp!\n\n` +
-                        `*(Requisitos para retirada: R$ 700,00 de entrada [caução + 1ª semana], CNH A, comprovante de residência e 1 testemunha no contrato).* \n\n` +
+                        `*(Requisitos para retirada: R$ 700,00 de entrada [caução + 1ª semana], CNH A, comprovante de residência, 1 testemunha no contrato e permanência mínima de 3 meses).* \n\n` +
                         `Digite *0* para voltar ao menu principal.`;
                     await enviarMensagem(remoteJid, respCliente);
 
