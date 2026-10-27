@@ -740,7 +740,7 @@ async function buscarVeiculoCompleto(entrada) {
                 valor: parseFloat(val) || 350.00,
                 status: f.status?.stringValue || 'ativo'
             };
-        }).filter(c => c.status !== 'encerrado');
+        }).filter(c => c.status !== 'encerrado' && c.id !== 'zop9fmhd1' && !(c.motoPlaca === 'IPU2I57' && (c.clienteNome || '').toLowerCase().includes('paulo')));
 
         // 1. Procura por Placa
         let motoMatch = null;
@@ -1074,8 +1074,10 @@ Locação de motos com quilometragem livre e suporte completo.
 
     motos: `🏍️ *FACILITA MOTO — DISPONIBILIDADE E REQUISITOS* 📋
 
-⚠️ *Status da Frota:* No momento, *todas as nossas motos estão 100% LOCADAS!* 🛵💨
-Nossa procura é grande, mas abrimos vagas prioritárias conforme devoluções e novas motos entram na frota.
+🟢 *Status da Frota:* Temos *1 MOTO DISPONÍVEL NO PÁTIO* para retirada imediata! 🛵💨
+• *Modelo:* HONDA CG 150 TITAN MIX (Placa: IPU2I57) • Cor Preta
+• *Plano Semanal:* R$ 350,00/semana (Quilometragem Livre)
+• *Entrada:* R$ 700,00 (R$ 350 caução + R$ 350 da 1ª semana adiantada)
 
 💰 *Valores para Retirada (R$ 700,00):*
 • *R$ 350,00 de Caução* (devolvida no encerramento do contrato)
@@ -1091,9 +1093,9 @@ Nossa procura é grande, mas abrimos vagas prioritárias conforme devoluções e
 5. *Permanência mínima de 3 meses* (com fidelidade contratual e quitação dos meses faltantes em caso de quebra)
 
 ━━━━━━━━━━━━━━━━━━━━
-📝 *FILA DE ESPERA PRIORITÁRIA (Etapa 1 de 4)*
+📝 *CADASTRO PARA LOCAÇÃO IMEDIATA (Etapa 1 de 4)*
 
-Para garantir sua vaga com prioridade, vamos registrar seu cadastro passo a passo!
+Para garantir a moto e agilizar a sua retirada no pátio, vamos registrar seu cadastro passo a passo!
 
 👉 *1. Qual é o seu NOME COMPLETO?*
 *(Digite 0 a qualquer momento para voltar ao menu principal).*`,
@@ -2231,7 +2233,7 @@ async function executarRotinaAvisosAutomaticos() {
                 ultimoAvisoVencimentoData: f.ultimoAvisoVencimentoData?.stringValue || '',
                 ultimoAvisoAtrasoData: f.ultimoAvisoAtrasoData?.stringValue || ''
             };
-        }).filter(c => c.status !== 'encerrado');
+        }).filter(c => c.status !== 'encerrado' && c.id !== 'zop9fmhd1' && !(c.motoPlaca === 'IPU2I57' && (c.clienteNome || '').toLowerCase().includes('paulo')));
 
         // =================================================================
         // 1. AVISOS DE PAGAMENTO SEMANAL (SEM INTERVENÇÃO HUMANA)
