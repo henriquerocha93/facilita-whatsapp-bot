@@ -1191,9 +1191,7 @@ async function startWhatsAppBot() {
             defaultQueryTimeoutMs: 60000,
             syncFullHistory: false,
             getMessage: async (key) => {
-                return {
-                    conversation: 'menu'
-                };
+                return undefined;
             }
         });
 
@@ -1323,11 +1321,8 @@ sock.ev.on('messages.upsert', async ({ messages, type }) => {
                     remoteJid = remoteJid.split(':')[0] + (remoteJid.includes('@lid') ? '@lid' : '@s.whatsapp.net');
                 }
 
-                // Se a mensagem chegou sem payload legível (erro de Bad MAC / desincronização de chave):
-                // Envia o Menu Principal com proteção Anti-Spam (8s). O envio da mensagem restabelece o handshake PreKey!
+                // Ignora mensagens sem payload legível (recibos, status, sincronização interna) para evitar loops
                 if (!msg.message) {
-                    console.warn(`⚠️ [Decryption Recovery]: Mensagem de ${remoteJid} sem payload legível. Reestabelecendo sessão e enviando Menu Principal...`);
-                    await enviarMenuComAntiSpam(remoteJid, MENUS.principal);
                     continue;
                 }
 
@@ -2145,6 +2140,11 @@ Qualquer mensagem que você digitar agora será entregue ao cliente pelo WhatsAp
                         await enviarMensagem(remoteJid, `❌ *Nenhum contrato ativo localizado para "${textoOriginal}".*\n\nPor favor, envie a placa correta da sua moto ou o seu CPF cadastrado.\nDigite *0* para voltar ao menu principal.`);
                         continue;
                     }
+                }
+
+                // Se a mensagem estiver vazia (ex: reação, figurinha, status), não dispara menu
+                if (!texto) {
+                    continue;
                 }
 
                 // Padrão: Apresenta o Menu Principal (com proteção anti-spam para evitar múltiplos disparos no mesmo contato)
